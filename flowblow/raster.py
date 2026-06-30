@@ -487,22 +487,16 @@ def _draw_scene(diagram: Diagram, layout, blocks, unit: float,
 
     for lb, mid, perp in deferred_labels:
         hw, hh = lb.w * unit / 2, lb.h * unit / 2
-        base = lb.h * unit * 0.62 + 8 * unit
-        step = lb.h * unit * 0.55
-        # search outward along BOTH perpendicular directions; take the first
-        # position that clears every node and group label.
-        best = (mid[0] + perp[0] * base, mid[1] + perp[1] * base)
-        for d in range(0, 9):
-            found = False
-            for sign in ((1,) if d == 0 else (1, -1)):
-                off = base + d * step
-                cx = mid[0] + perp[0] * sign * off
-                cy = mid[1] + perp[1] * sign * off
-                if not _overlaps(cx, cy, hw + 2 * unit, hh + 1 * unit):
-                    best = (cx, cy)
-                    found = True
-                    break
-            if found:
+        # Sit at the MIDDLE of the line, just beside it. Offset perpendicular by
+        # half the label height so the text clears the stroke; prefer the
+        # "upper" side, flip to the other only if that side is blocked.
+        off = hh + 5 * unit
+        best = (mid[0] + perp[0] * off, mid[1] + perp[1] * off)
+        for sign in (1, -1):
+            cx = mid[0] + perp[0] * sign * off
+            cy = mid[1] + perp[1] * sign * off
+            if not _overlaps(cx, cy, hw + 1 * unit, hh):
+                best = (cx, cy)
                 break
         # keep the label fully inside the canvas so it never clips at the edge
         W, H = dr.img.size
