@@ -594,13 +594,38 @@ def _seg_hits_box(a, b, box, samples: int = 40) -> bool:
     return False
 
 
-def _route_around(a, b, boxes):
+def _segs_cross(p1, p2, p3, p4) -> bool:
+    """True if open segments p1-p2 and p3-p4 properly cross (shared endpoints
+    don't count)."""
+    for a in (p1, p2):
+        for b in (p3, p4):
+            if abs(a[0] - b[0]) < 1e-6 and abs(a[1] - b[1]) < 1e-6:
+                return False
+
+    def ccw(a, b, c):
+        return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0])
+    return (ccw(p1, p3, p4) != ccw(p2, p3, p4) and
+            ccw(p1, p2, p3) != ccw(p1, p2, p4))
+
+
+def _route_around(a, b, boxes, prior=()):
     """Shortest poly-line from a to b that never passes through an obstacle box
-    (so edges never go behind a node). Visibility-graph + Dijkstra over the box
-    corners. Boxes are (x0,y0,x1,y1), already inflated."""
+    (so edges never go behind a node) and that avoids crossing the already-drawn
+    edges in ``prior`` when it can. Visibility-graph + Dijkstra over box corners.
+    Boxes are (x0,y0,x1,y1), already inflated; prior is a list of polylines."""
     import heapq
 
-    if not any(_seg_hits_box(a, b, bx) for bx in boxes):
+    CROSS_PEN = 1200.0
+
+    def crossings(p, q):
+        c = 0
+        for poly in prior:
+            for k in range(len(poly) - 1):
+                if _segs_cross(p, q, poly[k], poly[k + 1]):
+                    c += 1
+        return c
+
+    if not any(_seg_hits_box(a, b, bx) for bx in boxes) and not crossings(a, b):
         return [a, b]
 
     pad = 1.0
@@ -624,14 +649,14 @@ def _route_around(a, b, boxes):
         if u == 1:
             break
         for v in range(n):
-            if v == u:
+            if v == u or not visible(nodes[u], nodes[v]):
                 continue
-            if visible(nodes[u], nodes[v]):
-                w = math.hypot(nodes[v][0] - nodes[u][0], nodes[v][1] - nodes[u][1])
-                if d + w < dist[v]:
-                    dist[v] = d + w
-                    prev[v] = u
-                    heapq.heappush(pq, (d + w, v))
+            w = math.hypot(nodes[v][0] - nodes[u][0], nodes[v][1] - nodes[u][1])
+            w += CROSS_PEN * crossings(nodes[u], nodes[v])
+            if d + w < dist[v]:
+                dist[v] = d + w
+                prev[v] = u
+                heapq.heappush(pq, (d + w, v))
 
     if dist[1] is math.inf or prev[1] == -1:
         return [a, b]
@@ -766,23 +791,28 @@ def _clustered_impl(diagram, measure, node_by_id, active, order_hint) -> Layout:
                    p.x + p.w / 2 + inflate, p.y + p.h / 2 + inflate)
              for nid, p in placed.items()}
     pedges: List[PlacedEdge] = []
+    drawn: List[list] = []  # poly-lines already placed (for crossing avoidance)
     for g in active:
         ox, oy = offset[g.id]
         for se in sub[g.id].edges:
             pts = [(x + ox, y + oy) for (x, y) in se.points]
             pedges.append(PlacedEdge(source=se.source, target=se.target,
                                      points=pts, reversed=se.reversed))
-    for e in diagram.edges:
-        if e.source not in placed or e.target not in placed:
-            continue
-        sg, tg = node_by_id[e.source].group, node_by_id[e.target].group
-        if sg is not None and sg == tg:
-            continue  # intra-cluster, already added from the sub-layout
+            drawn.append(pts)
+    # route inter-cluster edges hardest (longest) first, avoiding earlier ones
+    inter = [e for e in diagram.edges
+             if e.source in placed and e.target in placed
+             and not (node_by_id[e.source].group is not None
+                      and node_by_id[e.source].group == node_by_id[e.target].group)]
+    inter.sort(key=lambda e: math.hypot(placed[e.source].x - placed[e.target].x,
+                                        placed[e.source].y - placed[e.target].y))
+    for e in inter:
         ps, pt = placed[e.source], placed[e.target]
         obstacles = [b for nid, b in boxes.items() if nid not in (e.source, e.target)]
-        pts = _route_around((ps.x, ps.y), (pt.x, pt.y), obstacles)
+        pts = _route_around((ps.x, ps.y), (pt.x, pt.y), obstacles, prior=drawn)
         pedges.append(PlacedEdge(source=e.source, target=e.target,
                                  points=pts, reversed=False))
+        drawn.append(pts)
 
     # 5. group boxes from their (now contiguous) members
     gplaced: List[PlacedGroup] = []
