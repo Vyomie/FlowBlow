@@ -12,12 +12,12 @@ import math
 import random
 from typing import List, Optional, Sequence, Tuple
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 from .content import Block, get_font, layout_block, render_emoji
 from .layout import PlacedNode, layout_diagram
 from .mathtex import render_math
-from .models import Diagram, EdgeStyle, Shape
+from .models import Diagram, Direction, EdgeStyle, Shape
 
 # ---- palette (shared look with the HTML renderer) -------------------------
 PALETTE = [
@@ -161,6 +161,7 @@ class _Drawer:
         self.d = ImageDraw.Draw(img)
         self.unit = unit            # layout units -> output px
         self.ox, self.oy = ox, oy   # output origin offset
+        self.accent = ink           # ink colour as hex string
         self.ink = hex_rgba(ink)
         self.stroke = max(1.4, 2.4 * unit)
         self.amp = 1.5 * unit
@@ -243,6 +244,26 @@ class _Drawer:
                 elif r.kind == "icon":
                     self.blit(render_emoji(r.payload), rx + (r.w * u) / 2, yc, r.h * u)
             cur_y += line_h * spacing
+
+    def label_with_halo(self, blk: Block, cx: float, cy: float, weight: int,
+                        color: str, halo=(255, 255, 255)):
+        """Draw a label with a soft white knockout so it reads over any line
+        (no boxy pill)."""
+        u = self.unit
+        pad = int(round(5 * u)) + 2
+        w = max(1, int(math.ceil(blk.w * u)) + 2 * pad)
+        h = max(1, int(math.ceil(blk.h * u)) + 2 * pad)
+        tile = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        sub = _Drawer(tile, u, 0, 0, self.accent)
+        sub.text_block(blk, w / 2, h / 2, weight, color)
+        # build a dilated, blurred white halo from the text's alpha
+        r = max(1, int(round(2.4 * u)))
+        alpha = tile.getchannel("A").filter(ImageFilter.MaxFilter(2 * r + 1))
+        alpha = alpha.filter(ImageFilter.GaussianBlur(max(0.6, u * 0.7)))
+        halo_img = Image.new("RGBA", tile.size, halo + (255,))
+        halo_img.putalpha(alpha)
+        composed = Image.alpha_composite(halo_img, tile)
+        self.img.alpha_composite(composed, (int(round(cx - w / 2)), int(round(cy - h / 2))))
 
 
 # ---------------------------------------------------------------------------
@@ -329,12 +350,9 @@ def _draw_scene(diagram: Diagram, layout, blocks, unit: float,
         if meta and meta.label:
             gb = layout_block(meta.label, size=diagram.font_size * 0.92, weight=700)
             gb.size = diagram.font_size * 0.92
-            lx = x0 + gb.w * unit / 2 + 10 * unit
-            ly = y0 + gb.h * unit / 2 + 6 * unit
-            dr.d.rectangle([lx - gb.w * unit / 2 - 4 * unit, ly - gb.h * unit / 2,
-                            lx + gb.w * unit / 2 + 4 * unit, ly + gb.h * unit / 2],
-                           fill=(255, 255, 255, 200))
-            dr.text_block(gb, lx, ly, 700, diagram.accent)
+            lx = x0 + gb.w * unit / 2 + 12 * unit
+            ly = y0 + gb.h * unit / 2 + 8 * unit
+            dr.label_with_halo(gb, lx, ly, 700, diagram.accent)
 
     # --- edges --- (labels are deferred so nodes never hide them)
     deferred_labels: List[Tuple[Block, Point]] = []
@@ -380,13 +398,24 @@ def _draw_scene(diagram: Diagram, layout, blocks, unit: float,
         if spec.bidirectional:
             arrow(sampled[0], sampled[1])
 
-        # edge label (drawn later, on top of everything)
+        # edge label (drawn later, on top of everything), floated just off the
+        # line so it never sits on top of a node's own text.
         if spec.label:
-            mid = sampled[len(sampled) // 2]
-            lb = layout_block(spec.label, size=diagram.font_size * 0.78, weight=600,
+            i = len(sampled) // 2
+            mid = sampled[i]
+            a = sampled[max(0, i - 1)]
+            b = sampled[min(len(sampled) - 1, i + 1)]
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            L = math.hypot(dx, dy) or 1.0
+            perp = (-dy / L, dx / L)
+            if perp[1] > 0:                # push to the "upper" side
+                perp = (-perp[0], -perp[1])
+            lb = layout_block(spec.label, size=diagram.font_size * 0.84, weight=600,
                               max_width=diagram.font_size * 12)
-            lb.size = diagram.font_size * 0.78
-            deferred_labels.append((lb, mid))
+            lb.size = diagram.font_size * 0.84
+            off = lb.h * unit * 0.62 + 7 * unit
+            pos = (mid[0] + perp[0] * off, mid[1] + perp[1] * off)
+            deferred_labels.append((lb, pos))
 
     # --- nodes ---
     for nid, pn in layout.nodes.items():
@@ -413,15 +442,9 @@ def _draw_scene(diagram: Diagram, layout, blocks, unit: float,
         blk = blocks[nid]
         dr.text_block(blk, cx, cy, 600, diagram.accent)
 
-    # --- edge labels on top ---
+    # --- edge labels on top (soft halo, no boxy pill) ---
     for lb, mid in deferred_labels:
-        bw, bh = lb.w * unit, lb.h * unit
-        pad = 5 * unit
-        dr.d.rounded_rectangle(
-            [mid[0] - bw / 2 - pad, mid[1] - bh / 2 - pad / 2,
-             mid[0] + bw / 2 + pad, mid[1] + bh / 2 + pad / 2],
-            radius=8 * unit, fill=(255, 255, 255, 225))
-        dr.text_block(lb, mid[0], mid[1], 600, diagram.accent)
+        dr.label_with_halo(lb, mid[0], mid[1], 600, diagram.accent)
 
 
 def _draw_cylinder(dr: _Drawer, cx, cy, w, h, fill, seed):
@@ -450,9 +473,21 @@ def _draw_note_fold(dr: _Drawer, cx, cy, w, h):
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
+_ROTATE = {Direction.TB: Direction.LR, Direction.LR: Direction.TB,
+           Direction.BT: Direction.RL, Direction.RL: Direction.BT}
+
+
+def _scene_size(layout, title_block, fs):
+    top = (title_block.h + fs * 1.1) if title_block else 0.0
+    scene_w = max(layout.width, title_block.w if title_block else 0)
+    scene_h = layout.height + top
+    return scene_w, scene_h, top
+
+
 def render_png_bytes(diagram: Diagram, width: int = 1920, height: int = 1080,
                      scale: float = 2.0, transparent: bool = True,
-                     pad_frac: float = 0.05, supersample: int = 2) -> bytes:
+                     pad_frac: float = 0.05, supersample: int = 2,
+                     auto_orient: bool = True) -> bytes:
     import io
 
     fs = diagram.font_size
@@ -462,24 +497,33 @@ def render_png_bytes(diagram: Diagram, width: int = 1920, height: int = 1080,
         b = blocks[node.id]
         return _inflate(b.w, b.h, node.shape, font_size)
 
-    layout = layout_diagram(diagram, measure=measure)
-
-    # scene = optional title band + diagram (in layout units)
-    W, H = layout.width, layout.height
     title_block = None
-    top = 0.0
     if diagram.title:
         title_block = layout_block(diagram.title, size=fs * 1.9, weight=700)
         title_block.size = fs * 1.9
-        top = title_block.h + fs * 1.1
-    scene_w = max(W, title_block.w if title_block else 0)
-    scene_h = H + top
-    diagram_ox = (scene_w - W) / 2
 
-    # fit into the frame
     fw, fh = int(width * scale), int(height * scale)
     pad = pad_frac * min(fw, fh)
-    fit = min((fw - 2 * pad) / scene_w, (fh - 2 * pad) / scene_h)
+
+    # Try the requested orientation and its 90-degree rotation, then keep
+    # whichever fills the frame best -- so a tall flow is laid out sideways to
+    # make the most of a wide 16:9 canvas.
+    candidates = [diagram.direction]
+    if auto_orient and _ROTATE[diagram.direction] not in candidates:
+        candidates.append(_ROTATE[diagram.direction])
+
+    best = None
+    for direction in candidates:
+        diagram.direction = direction
+        cand_layout = layout_diagram(diagram, measure=measure)
+        sw, sh, top = _scene_size(cand_layout, title_block, fs)
+        cand_fit = min((fw - 2 * pad) / sw, (fh - 2 * pad) / sh)
+        if best is None or cand_fit > best[0] + 1e-9:
+            best = (cand_fit, direction, cand_layout, sw, sh, top)
+
+    fit, chosen, layout, scene_w, scene_h, top = best
+    diagram.direction = chosen
+    diagram_ox = (scene_w - layout.width) / 2
 
     ss = max(1, supersample)
     unit = fit * ss
