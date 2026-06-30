@@ -44,8 +44,8 @@ def healthz() -> dict:
 @app.post("/render")
 def render_endpoint(
     diagram: Diagram,
-    width: int = 1920,
-    height: int = 1080,
+    width: int = 1080,
+    height: int = 1920,
     scale: float = 2.0,
     transparent: bool = True,
 ) -> Response:
@@ -65,7 +65,7 @@ def render_html_endpoint(diagram: Diagram) -> HTMLResponse:
 
 
 @app.get("/examples/{name}.png")
-def render_example(name: str, width: int = 1920, height: int = 1080,
+def render_example(name: str, width: int = 1080, height: int = 1920,
                    scale: float = 2.0, transparent: bool = True) -> Response:
     path = EXAMPLES_DIR / f"{name}.json"
     if not path.exists():

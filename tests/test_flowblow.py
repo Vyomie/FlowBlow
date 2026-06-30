@@ -37,17 +37,22 @@ def test_render_html_contains_svg():
     assert "<svg" in html and "node-shape" in html
 
 
-def test_render_png_is_16_9_and_transparent():
+def test_render_png_default_is_9_16():
     spec = {
         "title": "T",
         "nodes": [{"id": "a", "label": "Start"}, {"id": "b", "label": "$E=mc^2$"}],
         "edges": [{"from": "a", "to": "b", "label": "go"}],
     }
-    png = render_png(spec, width=800, height=450, scale=1, transparent=True)
+    png = render_png(spec, scale=1)            # use the defaults
     w, h = _png_size(png)
-    assert (w, h) == (800, 450)
-    # 16:9
-    assert abs(w / h - 16 / 9) < 1e-6
+    assert (w, h) == (1080, 1920)              # 9:16 portrait
+    assert abs(w / h - 9 / 16) < 1e-6
+
+
+def test_render_png_custom_size_and_transparent():
+    spec = {"nodes": [{"id": "a", "label": "Start"}]}
+    png = render_png(spec, width=800, height=450, scale=1, transparent=True)
+    assert _png_size(png) == (800, 450)
 
 
 def test_all_examples_render():
@@ -62,6 +67,7 @@ def test_all_examples_render():
 if __name__ == "__main__":
     test_layout_handles_cycles_and_disconnected()
     test_render_html_contains_svg()
-    test_render_png_is_16_9_and_transparent()
+    test_render_png_default_is_9_16()
+    test_render_png_custom_size_and_transparent()
     test_all_examples_render()
     print("all tests passed")

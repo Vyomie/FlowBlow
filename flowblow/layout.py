@@ -24,11 +24,11 @@ from .models import Diagram, Direction, Shape
 # ---------------------------------------------------------------------------
 # Tunable spacing constants (pixels)
 # ---------------------------------------------------------------------------
-LAYER_GAP = 120         # spacing between successive layers (along main axis)
-SIBLING_GAP = 58        # min spacing between nodes inside the same layer
-COMPONENT_GAP = 90      # spacing between disconnected components
+LAYER_GAP = 95          # spacing between successive layers (along main axis)
+SIBLING_GAP = 50        # min spacing between nodes inside the same layer
+COMPONENT_GAP = 80      # spacing between disconnected components
 DUMMY_SIZE = 2          # cross-extent of a virtual routing node
-MARGIN = 32             # outer canvas margin (kept small; PNG fit adds framing)
+MARGIN = 24             # outer canvas margin (kept small; PNG fit adds framing)
 GROUP_PAD = 26          # padding of a cluster box around its members
 
 

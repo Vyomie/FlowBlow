@@ -445,14 +445,12 @@ def _draw_scene(diagram: Diagram, layout, blocks, unit: float,
             dx, dy = b[0] - a[0], b[1] - a[1]
             L = math.hypot(dx, dy) or 1.0
             perp = (-dy / L, dx / L)
-            if perp[1] > 0:                # push to the "upper" side
+            if perp[1] > 0:                # prefer the "upper" side
                 perp = (-perp[0], -perp[1])
             lb = layout_block(spec.label, size=diagram.font_size, weight=600,
                               max_width=diagram.font_size * 14)
             lb.size = diagram.font_size
-            off = lb.h * unit * 0.62 + 8 * unit
-            pos = (mid[0] + perp[0] * off, mid[1] + perp[1] * off)
-            deferred_labels.append((lb, pos, perp))
+            deferred_labels.append((lb, mid, perp))
 
     # --- nodes ---
     for nid, pn in layout.nodes.items():
@@ -487,17 +485,30 @@ def _draw_scene(diagram: Diagram, layout, blocks, unit: float,
                 return True
         return False
 
-    for lb, pos, perp in deferred_labels:
+    for lb, mid, perp in deferred_labels:
         hw, hh = lb.w * unit / 2, lb.h * unit / 2
-        cx, cy = pos
-        # nudge the label along its perpendicular until it clears every node
+        base = lb.h * unit * 0.62 + 8 * unit
         step = lb.h * unit * 0.55
-        for _ in range(6):
-            if not _overlaps(cx, cy, hw + 2 * unit, hh + 1 * unit):
+        # search outward along BOTH perpendicular directions; take the first
+        # position that clears every node and group label.
+        best = (mid[0] + perp[0] * base, mid[1] + perp[1] * base)
+        for d in range(0, 9):
+            found = False
+            for sign in ((1,) if d == 0 else (1, -1)):
+                off = base + d * step
+                cx = mid[0] + perp[0] * sign * off
+                cy = mid[1] + perp[1] * sign * off
+                if not _overlaps(cx, cy, hw + 2 * unit, hh + 1 * unit):
+                    best = (cx, cy)
+                    found = True
+                    break
+            if found:
                 break
-            cx += perp[0] * step
-            cy += perp[1] * step
-        dr.label_with_halo(lb, cx, cy, 600, diagram.accent)
+        # keep the label fully inside the canvas so it never clips at the edge
+        W, H = dr.img.size
+        bx = min(max(best[0], hw + 4), W - hw - 4)
+        by = min(max(best[1], hh + 4), H - hh - 4)
+        dr.label_with_halo(lb, bx, by, 600, diagram.accent)
 
 
 def _draw_cylinder(dr: _Drawer, cx, cy, w, h, fill, seed):
@@ -537,9 +548,9 @@ def _scene_size(layout, title_block, fs):
     return scene_w, scene_h, top
 
 
-def render_png_bytes(diagram: Diagram, width: int = 1920, height: int = 1080,
+def render_png_bytes(diagram: Diagram, width: int = 1080, height: int = 1920,
                      scale: float = 2.0, transparent: bool = True,
-                     pad_frac: float = 0.05, supersample: int = 2,
+                     pad_frac: float = 0.035, supersample: int = 2,
                      auto_orient: bool = True) -> bytes:
     import io
 
@@ -579,7 +590,7 @@ def render_png_bytes(diagram: Diagram, width: int = 1920, height: int = 1080,
     diagram_ox = (scene_w - layout.width) / 2
 
     # extra margin so bowed arcs / floated labels never clip at the edge
-    B = fs * 2.6
+    B = fs * 1.9
     total_w, total_h = scene_w + 2 * B, scene_h + 2 * B
     fit = min((fw - 2 * pad) / total_w, (fh - 2 * pad) / total_h)
 

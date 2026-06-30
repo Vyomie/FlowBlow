@@ -1,34 +1,39 @@
 # FlowBlow ✍️
 
-Generate **hand-drawn flow & architecture diagrams** as PNGs, straight from Python.
+Generate **hand-drawn flow & architecture diagrams** as PNG images, straight
+from Python — sketchy borders, the **Caveat** handwriting font, inline
+**LaTeX**, and a transparent background by default.
 
-FlowBlow takes a small JSON spec (nodes + edges) and renders a sketchy,
-handwritten-style diagram — flowcharts, system architectures, data pipelines,
-state machines, whatever you can express as a directed graph. It is **not**
-limited to traditional flowcharts.
+It is **not** limited to traditional flowcharts: because a diagram is just a
+directed graph with optional clusters, it can describe architectures, data
+pipelines, state machines, mind-maps, anything.
 
-- 🖋️ **Handwritten look** — everything is set in the *Caveat* font (bundled &
-  embedded, no network needed) with jittered, double-stroked "rough" borders.
-- ∑ **LaTeX** — inline `$...$` math is rasterised with matplotlib and composited
-  into labels. Latin letters/digits/operators render in Caveat; symbols Caveat
-  lacks (Greek, ∇, ‖·‖, …) fall back to a math font.
-- 🧩 **Real auto-layout** — a from-scratch layered (Sugiyama) engine: cycle
-  breaking, longest-path ranking, dummy-node edge routing and crossing
-  reduction. Handles cycles and disconnected graphs.
-- 🟦 **Shapes & clusters** — rect, rounded, stadium, ellipse, circle, diamond,
-  hexagon, parallelogram, cylinder (db), cloud, note — plus labelled group/
-  subgraph boxes for architectures.
-- 🖼️ **PNG output** — transparent background, scaled to best fill a **16:9**
-  frame (configurable). Rendered **purely in Pillow** — no browser, no HTML.
+<p align="center">
+  <img src="examples/png/algorithm.png" width="230">
+  <img src="examples/png/architecture.png" width="230">
+</p>
 
-| Flowchart | Architecture | LaTeX |
-|---|---|---|
-| `examples/png/simple.png` | `examples/png/architecture.png` | `examples/png/algorithm.png` |
+## Highlights
+
+- **Pure Python rendering** — shapes, edges and text are drawn with Pillow
+  (no browser/HTML). LaTeX is rasterised by matplotlib's mathtext.
+- **Hand-drawn look** — every outline is jittered + double-stroked; node fills
+  use a soft pastel palette.
+- **Caveat handwriting everywhere**, including LaTeX (the font is embedded, so
+  the look needs no network).
+- **Automatic layout** — a layered (Sugiyama) engine handles cycles,
+  disconnected pieces and long edges; parallel/back edges bow into their own
+  arcs; edge labels auto-dodge nodes and group labels.
+- **Fills the frame** — the diagram is laid out in whichever orientation best
+  fills the output frame (defaults to **9:16 portrait**).
+- Shapes: rect, rounded, stadium, ellipse, circle, diamond, hexagon,
+  parallelogram, cylinder (DB), cloud, note. Edge styles: solid/dashed/dotted,
+  optional emoji icons, and cluster groups.
 
 ## Install
 
 ```bash
-pip install -r requirements.txt        # Pillow, matplotlib, pydantic (+ fastapi for the API)
+pip install -r requirements.txt      # Pillow, matplotlib, pydantic (+ fastapi for the API)
 ```
 
 ## Use it
@@ -38,99 +43,73 @@ pip install -r requirements.txt        # Pillow, matplotlib, pydantic (+ fastapi
 ```python
 from flowblow import render_png
 
-spec = {
-    "title": "Hello",
-    "direction": "LR",
+render_png({
+    "title": "Gradient Descent",
+    "direction": "TB",
     "nodes": [
-        {"id": "a", "label": "Start", "shape": "stadium"},
-        {"id": "b", "label": "Compute $E=mc^2$"},
-        {"id": "c", "label": "Done", "shape": "stadium", "icon": "✅"},
+        {"id": "s", "label": "Start", "shape": "stadium", "color": "#caffbf"},
+        {"id": "g", "label": "Compute gradient $\\nabla_\\theta J(\\theta)$"},
+        {"id": "c", "label": "Converged? $\\|\\nabla J\\| < \\epsilon$", "shape": "diamond"},
+        {"id": "d", "label": "Return $\\theta^{*}$", "shape": "stadium", "color": "#ffadad"},
     ],
     "edges": [
-        {"from": "a", "to": "b", "label": "go"},
-        {"from": "b", "to": "c"},
+        {"from": "s", "to": "g"},
+        {"from": "g", "to": "c"},
+        {"from": "c", "to": "g", "label": "no", "style": "dashed"},
+        {"from": "c", "to": "d", "label": "yes"},
     ],
-}
-
-png_bytes = render_png(spec, output="hello.png")          # transparent 3840x2160
-# render_png(spec, width=2560, height=1440, scale=2, transparent=False)
+}, output="gd.png")        # 1080x1920 transparent PNG by default
 ```
 
 ### Command line
 
 ```bash
 python -m flowblow examples/architecture.json            # -> examples/architecture.png
-python -m flowblow spec.json -o out.png --width 2560 --height 1440
-python -m flowblow spec.json --html -o out.html          # standalone HTML (LaTeX via MathJax)
-cat spec.json | python -m flowblow -                     # stdin
+python -m flowblow spec.json -o out.png --width 1080 --height 1920
+python -m flowblow spec.json --html -o out.html          # standalone HTML (MathJax)
+python -m flowblow spec.json --opaque                     # paper background
 ```
 
 ### HTTP API
 
 ```bash
 uvicorn flowblow.api:app --reload
-# open http://localhost:8000/          -> interactive playground
-# POST http://localhost:8000/render    -> image/png   (body = the JSON spec)
-# GET  http://localhost:8000/examples/architecture.png
+# GET  /                      interactive playground
+# POST /render                -> image/png   (?width=&height=&scale=&transparent=)
+# POST /render.html           -> standalone HTML
+# GET  /examples/{name}.png   -> a bundled example
 ```
 
-Query params on the PNG endpoints: `width`, `height`, `scale`, `transparent`.
+## Diagram spec
 
-## Spec reference
+| field        | meaning |
+|--------------|---------|
+| `title`      | optional heading drawn above the diagram |
+| `direction`  | `TB` / `BT` / `LR` / `RL` (auto-rotated to best fill the frame) |
+| `nodes[]`    | `id`, `label`, `shape`, `color`, `group`, `icon` |
+| `edges[]`    | `from`/`to` (or `source`/`target`), `label`, `style`, `color`, `bidirectional` |
+| `groups[]`   | `id`, `label`, `color` — drawn as a labelled cluster behind its members |
+| `font_size`  | base size (default 34); plus `accent`/`paper` colours |
 
-```jsonc
-{
-  "title": "My System",
-  "direction": "TB",            // TB | BT | LR | RL
-  "font_size": 24,
-  "accent": "#2b2b2b",          // ink colour
-  "groups": [
-    { "id": "core", "label": "Core", "color": "#a0c4ff" }
-  ],
-  "nodes": [
-    {
-      "id": "api",
-      "label": "API  $f(x)$",   // LaTeX allowed
-      "shape": "rounded",       // see shapes above
-      "group": "core",          // optional cluster membership
-      "color": "#caffbf",       // optional fill override
-      "icon": "🌐"              // optional emoji shown above the label
-    }
-  ],
-  "edges": [
-    { "from": "api", "to": "db", "label": "query",
-      "style": "solid",         // solid | dashed | dotted
-      "bidirectional": false }
-  ]
-}
-```
+Labels may contain inline LaTeX in `$...$` or `$$...$$`.
 
-`from`/`to` (or `source`/`target`) reference node ids. Cycles and missing
-targets are handled gracefully.
+## Rendering options (`render_png`)
 
-## How it works
+`width`, `height` (default `1080x1920` = 9:16), `scale` (pixel multiplier,
+default 2 → 2160×3840), `transparent` (default `True`), `pad_frac`,
+`supersample`.
 
-```
-spec ─► models.py ─► layout.py ─► raster.py ─► PNG
-        (validate)   (Sugiyama)   (Pillow draw)
-                                    └─ content.py  (text/LaTeX/emoji measurement)
-                                    └─ mathtex.py  (LaTeX → image, matplotlib)
-```
+## Notes
 
-There is also an HTML renderer (`render_html`, `render.py` + `templates.py`)
-that emits a self-contained page using SVG + MathJax — handy when you want a
-live/scalable/selectable version instead of a raster.
+- LaTeX: Latin letters, digits and operators render in Caveat; symbols Caveat
+  lacks (Greek, ∇, ‖, …) fall back to a math font so they still render.
+- Emoji icons need a system colour-emoji font (e.g. Noto Color Emoji); if none
+  is present the icon is simply omitted.
+- A standalone HTML renderer (`render_html`) is also available — it uses MathJax
+  via CDN and is handy for live/scalable embedding.
 
 ## Tests
 
 ```bash
-PYTHONPATH=. python tests/test_flowblow.py      # or: python -m pytest -q
+python -m pytest -q          # or:  python tests/test_flowblow.py
 ```
-
-## Notes & limits
-
-- **Tall single-column flows** can't fill a wide 16:9 frame horizontally; they
-  centre with side margins. Pick `--width/--height` to match your shape.
-- **Group boxes** are axis-aligned bounding boxes of their members; a cluster
-  whose nodes span many layers can overlap a neighbouring cluster.
-- The bundled Caveat font is © The Caveat Project Authors, SIL Open Font License.
