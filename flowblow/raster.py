@@ -118,6 +118,30 @@ def _catmull(points: Sequence[Point], samples: int = 16) -> List[Point]:
     return out
 
 
+def _mid_and_tangent(pts):
+    """Point at half the polyline's arc length, plus the local direction there.
+
+    Robust for straight 2-point edges (returns the true geometric middle) and
+    for curved multi-point edges alike.
+    """
+    if len(pts) < 2:
+        return pts[0], (1.0, 0.0)
+    segs, total = [], 0.0
+    for a, b in zip(pts, pts[1:]):
+        d = math.hypot(b[0] - a[0], b[1] - a[1])
+        segs.append(d)
+        total += d
+    half = total / 2
+    run = 0.0
+    for (a, b), d in zip(zip(pts, pts[1:]), segs):
+        if run + d >= half and d > 0:
+            t = (half - run) / d
+            return ((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t),
+                    (b[0] - a[0], b[1] - a[1]))
+        run += d
+    return pts[len(pts) // 2], (pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1])
+
+
 def _dash(points: Sequence[Point], on: float, off: float) -> List[List[Point]]:
     """Split a polyline into dash sub-polylines by arc length."""
     if on <= 0:
@@ -436,13 +460,12 @@ def _draw_scene(diagram: Diagram, layout, blocks, unit: float,
         if spec.bidirectional:
             draw_arrow(sampled[0], sampled[1], color)
 
-        # edge label (deferred), floated just off the line, follows the bow.
+        # edge label (deferred), anchored at the true arc-length MIDDLE of the
+        # edge (not the midpoint index, which for a straight 2-point edge is the
+        # endpoint by the arrowhead).
         if spec.label:
-            i = len(sampled) // 2
-            mid = sampled[i]
-            a = sampled[max(0, i - 1)]
-            b = sampled[min(len(sampled) - 1, i + 1)]
-            dx, dy = b[0] - a[0], b[1] - a[1]
+            mid, tangent = _mid_and_tangent(sampled)
+            dx, dy = tangent
             L = math.hypot(dx, dy) or 1.0
             perp = (-dy / L, dx / L)
             if perp[1] > 0:                # prefer the "upper" side
