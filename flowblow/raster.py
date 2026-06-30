@@ -173,7 +173,10 @@ class _Drawer:
         return (x * self.unit + self.ox, y * self.unit + self.oy)
 
     # --- rough path utilities (input already in output px) ---
-    def _roughen(self, pts: Sequence[Point], closed: bool, seed: int) -> List[Point]:
+    def _roughen(self, pts: Sequence[Point], closed: bool, seed: int,
+                 amp: Optional[float] = None, seg: Optional[float] = None) -> List[Point]:
+        amp = self.amp if amp is None else amp
+        seg = self.seg if seg is None else seg
         rng = random.Random(seed)
         out: List[Point] = []
         pairs = list(zip(pts, list(pts[1:]) + ([pts[0]] if closed else [])))
@@ -181,11 +184,11 @@ class _Drawer:
             dx, dy = b[0] - a[0], b[1] - a[1]
             d = math.hypot(dx, dy) or 1.0
             nx, ny = -dy / d, dx / d
-            k = max(1, int(d / self.seg))
+            k = max(1, int(d / seg))
             for i in range(k):
                 t = i / k
                 fix_end = (not closed) and idx == 0 and i == 0
-                off = 0.0 if fix_end else rng.uniform(-self.amp, self.amp)
+                off = 0.0 if fix_end else rng.uniform(-amp, amp)
                 out.append((a[0] + dx * t + nx * off, a[1] + dy * t + ny * off))
         if closed:
             out.append(out[0])
@@ -334,6 +337,7 @@ def _draw_scene(diagram: Diagram, layout, blocks, unit: float,
     node_meta = {n.id: n for n in diagram.nodes}
     group_meta = {g.id: g for g in diagram.groups}
     group_color = {g.id: g.color for g in diagram.groups}
+    obstacles: List[Tuple[float, float, float, float]] = []  # node + group-label rects
 
     # --- groups (behind) ---
     for g in layout.groups:
@@ -353,53 +357,86 @@ def _draw_scene(diagram: Diagram, layout, blocks, unit: float,
             lx = x0 + gb.w * unit / 2 + 12 * unit
             ly = y0 + gb.h * unit / 2 + 8 * unit
             dr.label_with_halo(gb, lx, ly, 700, diagram.accent)
+            obstacles.append((lx - gb.w * unit / 2, ly - gb.h * unit / 2,
+                              lx + gb.w * unit / 2, ly + gb.h * unit / 2))
 
     # --- edges --- (labels are deferred so nodes never hide them)
-    deferred_labels: List[Tuple[Block, Point]] = []
+    deferred_labels: List[Tuple[Block, Point, Point]] = []
     round_shapes = (Shape.ellipse, Shape.circle, Shape.diamond)
     valid = [e for e in diagram.edges
              if e.source in layout.nodes and e.target in layout.nodes]
-    for spec, e in zip(valid, layout.edges):
+
+    # Bow parallel / back edges apart so they each get their own arc instead of
+    # overlapping on the same line.
+    BOW = 30.0  # layout units
+    pair_idx: dict = {}
+    for k, e in enumerate(layout.edges):
+        pair_idx.setdefault(frozenset((e.source, e.target)), []).append(k)
+    bow_of: dict = {}
+    for key, idxs in pair_idx.items():
+        if len(idxs) > 1 and len(key) == 2:
+            n = len(idxs)
+            for j, k in enumerate(idxs):
+                bow_of[k] = (j - (n - 1) / 2.0) * 2.0 * BOW
+
+    def draw_arrow(tip: Point, frm: Point, color):
+        dx, dy = tip[0] - frm[0], tip[1] - frm[1]
+        L = math.hypot(dx, dy) or 1.0
+        ux, uy = dx / L, dy / L
+        px, py = -uy, ux
+        size = 13 * unit
+        base = (tip[0] - ux * size, tip[1] - uy * size)
+        half = size * 0.6
+        dr.d.polygon([tip, (base[0] + px * half, base[1] + py * half),
+                      (base[0] - px * half, base[1] - py * half)], fill=color)
+
+    for k, (spec, e) in enumerate(zip(valid, layout.edges)):
         src, tgt = layout.nodes[e.source], layout.nodes[e.target]
         s_meta, t_meta = node_meta.get(e.source), node_meta.get(e.target)
-        pts = list(e.points)
         inset_s = 0.94 if (s_meta and s_meta.shape in round_shapes) else 1.0
         inset_t = 0.94 if (t_meta and t_meta.shape in round_shapes) else 1.0
-        pts[0] = _border_point(src, pts[1], inset_s)
-        pts[-1] = _border_point(tgt, pts[-2], inset_t)
-        sampled = [dr.T(*p) for p in _catmull(pts)]
+        raw = list(e.points)
+        bow = bow_of.get(k, 0.0)
+
+        if bow and len(raw) == 2:
+            (sx, sy), (ex, ey) = raw
+            mx, my = (sx + ex) / 2, (sy + ey) / 2
+            ddx, ddy = ex - sx, ey - sy
+            L = math.hypot(ddx, ddy) or 1.0
+            ctrl = (mx - ddy / L * bow, my + ddx / L * bow)
+            p0 = _border_point(src, ctrl, inset_s)
+            p1 = _border_point(tgt, ctrl, inset_t)
+            control = [p0, ctrl, p1]
+        else:
+            control = raw
+            control[0] = _border_point(src, control[1], inset_s)
+            control[-1] = _border_point(tgt, control[-2], inset_t)
+
+        sampled = [dr.T(*p) for p in _catmull(control, samples=22)]
         color = hex_rgba(spec.color) if spec.color else dr.ink
+        seed = _hash(e.source + e.target) & 255
+        # jitter the whole curve ONCE, then dash that single wavy path so the
+        # dashes stay connected and follow the curve.
+        wavy = dr._roughen(sampled, closed=False, seed=seed,
+                           amp=1.05 * unit, seg=11 * unit)
+        wdt = max(1, int(round(dr.stroke)))
 
         if spec.style == EdgeStyle.dashed:
-            for piece in _dash(sampled, 13 * unit, 9 * unit):
-                if len(piece) > 1:
-                    dr.stroke_path(piece, color, passes=1, seed=_hash(e.source + e.target) & 255)
+            pieces = _dash(wavy, 17 * unit, 11 * unit)
         elif spec.style == EdgeStyle.dotted:
-            for piece in _dash(sampled, 2.5 * unit, 8 * unit):
-                if len(piece) > 1:
-                    dr.stroke_path(piece, color, passes=1, seed=_hash(e.source + e.target) & 255)
+            pieces = _dash(wavy, 3.5 * unit, 7 * unit)
         else:
-            dr.stroke_path(sampled, color, passes=1, seed=_hash(e.source + e.target) & 255)
+            pieces = [wavy]
+        for piece in pieces:
+            if len(piece) > 1:
+                dr.d.line(piece, fill=color, width=wdt, joint="curve")
 
-        # arrow heads
-        def arrow(tip: Point, frm: Point):
-            dx, dy = tip[0] - frm[0], tip[1] - frm[1]
-            L = math.hypot(dx, dy) or 1.0
-            ux, uy = dx / L, dy / L
-            px, py = -uy, ux
-            size = 12 * unit
-            base = (tip[0] - ux * size, tip[1] - uy * size)
-            half = size * 0.6
-            tri = [tip, (base[0] + px * half, base[1] + py * half),
-                   (base[0] - px * half, base[1] - py * half)]
-            dr.d.polygon(tri, fill=color)
         if spec.arrow:
-            arrow(sampled[-1], sampled[-2])
+            draw_arrow(sampled[-1], sampled[-2], color)
         if spec.bidirectional:
-            arrow(sampled[0], sampled[1])
+            draw_arrow(sampled[0], sampled[1], color)
 
-        # edge label (drawn later, on top of everything), floated just off the
-        # line so it never sits on top of a node's own text.
+        # edge label (deferred), floated just off the line, follows the bow.
         if spec.label:
             i = len(sampled) // 2
             mid = sampled[i]
@@ -410,12 +447,12 @@ def _draw_scene(diagram: Diagram, layout, blocks, unit: float,
             perp = (-dy / L, dx / L)
             if perp[1] > 0:                # push to the "upper" side
                 perp = (-perp[0], -perp[1])
-            lb = layout_block(spec.label, size=diagram.font_size * 0.84, weight=600,
-                              max_width=diagram.font_size * 12)
-            lb.size = diagram.font_size * 0.84
-            off = lb.h * unit * 0.62 + 7 * unit
+            lb = layout_block(spec.label, size=diagram.font_size, weight=600,
+                              max_width=diagram.font_size * 14)
+            lb.size = diagram.font_size
+            off = lb.h * unit * 0.62 + 8 * unit
             pos = (mid[0] + perp[0] * off, mid[1] + perp[1] * off)
-            deferred_labels.append((lb, pos))
+            deferred_labels.append((lb, pos, perp))
 
     # --- nodes ---
     for nid, pn in layout.nodes.items():
@@ -429,6 +466,7 @@ def _draw_scene(diagram: Diagram, layout, blocks, unit: float,
             fill = PALETTE[_hash(nid) % len(PALETTE)]
         cx, cy = dr.T(pn.x, pn.y)
         w, h = pn.w * unit, pn.h * unit
+        obstacles.append((cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2))
         seed = _hash(nid) & 255
         fill_rgba = hex_rgba(fill, 235)
 
@@ -443,8 +481,23 @@ def _draw_scene(diagram: Diagram, layout, blocks, unit: float,
         dr.text_block(blk, cx, cy, 600, diagram.accent)
 
     # --- edge labels on top (soft halo, no boxy pill) ---
-    for lb, mid in deferred_labels:
-        dr.label_with_halo(lb, mid[0], mid[1], 600, diagram.accent)
+    def _overlaps(cx, cy, hw, hh):
+        for (x0, y0, x1, y1) in obstacles:
+            if cx + hw > x0 and cx - hw < x1 and cy + hh > y0 and cy - hh < y1:
+                return True
+        return False
+
+    for lb, pos, perp in deferred_labels:
+        hw, hh = lb.w * unit / 2, lb.h * unit / 2
+        cx, cy = pos
+        # nudge the label along its perpendicular until it clears every node
+        step = lb.h * unit * 0.55
+        for _ in range(6):
+            if not _overlaps(cx, cy, hw + 2 * unit, hh + 1 * unit):
+                break
+            cx += perp[0] * step
+            cy += perp[1] * step
+        dr.label_with_halo(lb, cx, cy, 600, diagram.accent)
 
 
 def _draw_cylinder(dr: _Drawer, cx, cy, w, h, fill, seed):
@@ -525,25 +578,30 @@ def render_png_bytes(diagram: Diagram, width: int = 1920, height: int = 1080,
     diagram.direction = chosen
     diagram_ox = (scene_w - layout.width) / 2
 
+    # extra margin so bowed arcs / floated labels never clip at the edge
+    B = fs * 2.6
+    total_w, total_h = scene_w + 2 * B, scene_h + 2 * B
+    fit = min((fw - 2 * pad) / total_w, (fh - 2 * pad) / total_h)
+
     ss = max(1, supersample)
     unit = fit * ss
-    scene_px_w = int(math.ceil(scene_w * unit)) + 2
-    scene_px_h = int(math.ceil(scene_h * unit)) + 2
+    scene_px_w = int(math.ceil(total_w * unit)) + 2
+    scene_px_h = int(math.ceil(total_h * unit)) + 2
 
     scene = Image.new("RGBA", (scene_px_w, scene_px_h), (0, 0, 0, 0))
     _draw_scene(diagram, layout, blocks, unit,
-                ox=diagram_ox * unit, oy=top * unit, img=scene)
+                ox=(B + diagram_ox) * unit, oy=(B + top) * unit, img=scene)
 
     # title
     if title_block is not None:
         tdr = _Drawer(scene, unit, 0, 0, diagram.accent)
-        tdr.text_block(title_block, scene_w * unit / 2,
-                       (title_block.h / 2 + fs * 0.2) * unit, 700, diagram.accent)
+        tcx = (B + scene_w / 2) * unit
+        tdr.text_block(title_block, tcx, (B + title_block.h / 2 + fs * 0.2) * unit,
+                       700, diagram.accent)
         # little underline flourish
         uw = title_block.w * unit * 0.6
-        ucx = scene_w * unit / 2
-        uy = (title_block.h + fs * 0.25) * unit
-        tdr.stroke_path([(ucx - uw / 2, uy), (ucx + uw / 2, uy)],
+        uy = (B + title_block.h + fs * 0.25) * unit
+        tdr.stroke_path([(tcx - uw / 2, uy), (tcx + uw / 2, uy)],
                         hex_rgba(diagram.accent, 140), width=max(1, 2 * unit), passes=1)
 
     # downsample supersample
