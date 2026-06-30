@@ -26,6 +26,7 @@ from .models import Diagram, Direction, Shape
 # ---------------------------------------------------------------------------
 LAYER_GAP = 95          # spacing between successive layers (along main axis)
 SIBLING_GAP = 50        # min spacing between nodes inside the same layer
+GROUP_GAP = 80          # extra spacing between nodes of different groups
 COMPONENT_GAP = 80      # spacing between disconnected components
 DUMMY_SIZE = 2          # cross-extent of a virtual routing node
 MARGIN = 24             # outer canvas margin (kept small; PNG fit adds framing)
@@ -189,6 +190,7 @@ class _Engine:
         self.measure = measure
         self.nodes: Dict[str, LNode] = {}
         self.edges: List[LEdge] = []
+        self.group_of: Dict[str, Optional[str]] = {}
         self.adj: Dict[str, List[str]] = {}
         self.radj: Dict[str, List[str]] = {}
         self.layers: List[List[str]] = []
@@ -205,6 +207,7 @@ class _Engine:
             else:
                 w, h, lines = estimate_size(n.label, n.shape, fs, bool(n.icon))
             self.nodes[n.id] = LNode(id=n.id, w=w, h=h, lines=lines)
+            self.group_of[n.id] = n.group
             self.adj.setdefault(n.id, [])
             self.radj.setdefault(n.id, [])
         for e in self.d.edges:
@@ -357,6 +360,38 @@ class _Engine:
         for it in range(6):
             reorder(up if it % 2 == 0 else down)
 
+        # Keep each group's nodes contiguous within every layer so its highlight
+        # box forms its own band and does not overlap other groups' boxes.
+        self._group_contiguous_order()
+
+    def _group_contiguous_order(self) -> None:
+        if not any(self.group_of.get(n) for n in self.nodes):
+            return
+        # A representative cross position per group = mean of normalised orders.
+        sums: Dict[str, float] = {}
+        counts: Dict[str, int] = {}
+        for layer in self.layers:
+            n = max(1, len(layer) - 1)
+            for i, nid in enumerate(layer):
+                g = self.group_of.get(nid)
+                if g:
+                    sums[g] = sums.get(g, 0.0) + i / n
+                    counts[g] = counts.get(g, 0) + 1
+        gmean = {g: sums[g] / counts[g] for g in sums}
+
+        for layer in self.layers:
+            n = max(1, len(layer) - 1)
+
+            def key(item):
+                i, nid = item
+                g = self.group_of.get(nid)
+                primary = gmean[g] if g else i / n
+                return (primary, i)
+
+            layer[:] = [nid for _, nid in sorted(enumerate(layer), key=key)]
+            for i, nid in enumerate(layer):
+                self.nodes[nid].order = i
+
     # -- 5. cross-axis coordinates -----------------------------------------
     def assign_cross(self) -> None:
         def cross_size(n: LNode) -> float:
@@ -364,15 +399,22 @@ class _Engine:
                 return DUMMY_SIZE
             return n.w if not self.horizontal else n.h
 
+        def gap_between(a_nid: str, b_nid: str) -> float:
+            # Larger gap across a group boundary so highlight boxes stay apart.
+            ga, gb = self.group_of.get(a_nid), self.group_of.get(b_nid)
+            return SIBLING_GAP + (GROUP_GAP if ga != gb else 0.0)
+
         # Initial packed positions per layer.
         for layer in self.layers:
             x = 0.0
+            prev = None
             for nid in layer:
                 n = self.nodes[nid]
                 half = cross_size(n) / 2
-                x += half
+                x += half + (gap_between(prev, nid) if prev else 0.0)
                 n.cross = x
-                x += half + SIBLING_GAP
+                x += half
+                prev = nid
 
         up: Dict[str, List[str]] = {nid: [] for nid in self.nodes}
         down: Dict[str, List[str]] = {nid: [] for nid in self.nodes}
@@ -385,12 +427,12 @@ class _Engine:
             # left-to-right then right-to-left to enforce min separation.
             for i in range(1, len(layer)):
                 a, b = self.nodes[layer[i - 1]], self.nodes[layer[i]]
-                min_d = cross_size(a) / 2 + cross_size(b) / 2 + SIBLING_GAP
+                min_d = cross_size(a) / 2 + cross_size(b) / 2 + gap_between(layer[i - 1], layer[i])
                 if b.cross - a.cross < min_d:
                     b.cross = a.cross + min_d
             for i in range(len(layer) - 2, -1, -1):
                 a, b = self.nodes[layer[i]], self.nodes[layer[i + 1]]
-                min_d = cross_size(a) / 2 + cross_size(b) / 2 + SIBLING_GAP
+                min_d = cross_size(a) / 2 + cross_size(b) / 2 + gap_between(layer[i], layer[i + 1])
                 if b.cross - a.cross < min_d:
                     a.cross = b.cross - min_d
 

@@ -36,6 +36,12 @@ def _hash(s: str) -> int:
     return h
 
 
+def _darken(col: str, factor: float) -> str:
+    """Return ``col`` scaled toward black by ``factor`` (0..1), as #rrggbb."""
+    r, g, b, _ = hex_rgba(col)
+    return "#%02x%02x%02x" % (int(r * factor), int(g * factor), int(b * factor))
+
+
 def hex_rgba(col: str, alpha: int = 255) -> Tuple[int, int, int, int]:
     col = (col or "#cccccc").strip()
     if not col.startswith("#"):
@@ -376,16 +382,18 @@ def _draw_scene(diagram: Diagram, layout, blocks, unit: float,
                 dr.d.line(piece, fill=hex_rgba(diagram.accent, 120),
                           width=max(1, int(round(dr.stroke * 0.8))), joint="curve")
         if meta and meta.label:
-            gb = layout_block(meta.label, size=diagram.font_size * 0.92, weight=700)
-            gb.size = diagram.font_size * 0.92
-            lx = x0 + gb.w * unit / 2 + 12 * unit
-            ly = y0 + gb.h * unit / 2 + 8 * unit
-            dr.label_with_halo(gb, lx, ly, 700, diagram.accent)
+            gb = layout_block(meta.label, size=diagram.font_size * 1.0, weight=700)
+            gb.size = diagram.font_size * 1.0
+            # title in the group's highlight colour, sitting just ABOVE the box
+            tint = _darken(col, 0.72)
+            lx = x0 + gb.w * unit / 2 + 6 * unit
+            ly = y0 - gb.h * unit / 2 - 5 * unit
+            dr.label_with_halo(gb, lx, ly, 700, tint)
             obstacles.append((lx - gb.w * unit / 2, ly - gb.h * unit / 2,
                               lx + gb.w * unit / 2, ly + gb.h * unit / 2))
 
     # --- edges --- (labels are deferred so nodes never hide them)
-    deferred_labels: List[Tuple[Block, Point, Point]] = []
+    deferred_labels: list = []  # (block, mid, perp, color, weight)
     round_shapes = (Shape.ellipse, Shape.circle, Shape.diamond)
     valid = [e for e in diagram.edges
              if e.source in layout.nodes and e.target in layout.nodes]
@@ -470,10 +478,18 @@ def _draw_scene(diagram: Diagram, layout, blocks, unit: float,
             perp = (-dy / L, dx / L)
             if perp[1] > 0:                # prefer the "upper" side
                 perp = (-perp[0], -perp[1])
-            lb = layout_block(spec.label, size=diagram.font_size, weight=600,
+            # yes/no decision labels -> a big green "Y" / red "N"
+            low = spec.label.strip().lower()
+            if low in ("yes", "y"):
+                text, lcolor, lsize, weight = "Y", "#2e9e3f", diagram.font_size * 1.9, 700
+            elif low in ("no", "n"):
+                text, lcolor, lsize, weight = "N", "#d83a3a", diagram.font_size * 1.9, 700
+            else:
+                text, lcolor, lsize, weight = spec.label, diagram.accent, diagram.font_size, 600
+            lb = layout_block(text, size=lsize, weight=weight,
                               max_width=diagram.font_size * 14)
-            lb.size = diagram.font_size
-            deferred_labels.append((lb, mid, perp))
+            lb.size = lsize
+            deferred_labels.append((lb, mid, perp, lcolor, weight))
 
     # --- nodes ---
     for nid, pn in layout.nodes.items():
@@ -517,7 +533,7 @@ def _draw_scene(diagram: Diagram, layout, blocks, unit: float,
             best = min(best, dist)
         return best
 
-    for lb, mid, perp in deferred_labels:
+    for lb, mid, perp, lcolor, lweight in deferred_labels:
         hw, hh = lb.w * unit / 2, lb.h * unit / 2
         # Keep the label at the MIDDLE of the line, beside it. On each side,
         # step out from the line just far enough to clear any node; then prefer
@@ -549,7 +565,7 @@ def _draw_scene(diagram: Diagram, layout, blocks, unit: float,
         W, H = dr.img.size
         bx = min(max(best[0], hw + 4), W - hw - 4)
         by = min(max(best[1], hh + 4), H - hh - 4)
-        dr.label_with_halo(lb, bx, by, 600, diagram.accent)
+        dr.label_with_halo(lb, bx, by, lweight, lcolor)
 
 
 def _draw_cylinder(dr: _Drawer, cx, cy, w, h, fill, seed):
@@ -602,10 +618,7 @@ def render_png_bytes(diagram: Diagram, width: int = 1080, height: int = 1920,
         b = blocks[node.id]
         return _inflate(b.w, b.h, node.shape, font_size)
 
-    title_block = None
-    if diagram.title:
-        title_block = layout_block(diagram.title, size=fs * 1.9, weight=700)
-        title_block.size = fs * 1.9
+    title_block = None  # titles are not drawn
 
     fw, fh = int(width * scale), int(height * scale)
     pad = pad_frac * min(fw, fh)
