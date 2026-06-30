@@ -95,7 +95,7 @@ class Diagram(BaseModel):
     edges: List[Edge] = Field(default_factory=list)
     groups: List[Group] = Field(default_factory=list)
     # Visual knobs.
-    font_size: int = 34
+    font_size: int = 40
     accent: str = "#2b2b2b"  # ink colour for strokes/text
     paper: str = "#fbf7ee"   # background "paper" colour
     # How to provide the Caveat handwriting font:

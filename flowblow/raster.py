@@ -186,21 +186,23 @@ def _dash(points: Sequence[Point], on: float, off: float) -> List[List[Point]]:
 # The drawer -- everything below works in OUTPUT pixels.
 # ---------------------------------------------------------------------------
 class _Drawer:
-    def __init__(self, img: Image.Image, unit: float, ox: float, oy: float, ink: str):
+    def __init__(self, img: Image.Image, ux: float, uy: float,
+                 ox: float, oy: float, ink: str):
         self.img = img
         self.d = ImageDraw.Draw(img)
-        self.unit = unit            # layout units -> output px
+        self.ux, self.uy = ux, uy   # layout units -> output px (per axis)
+        self.u = min(ux, uy)        # uniform scale for text, strokes, etc.
         self.ox, self.oy = ox, oy   # output origin offset
         self.accent = ink           # ink colour as hex string
         self.ink = hex_rgba(ink)
-        self.stroke = max(1.4, 2.4 * unit)
-        self.amp = 1.5 * unit
-        self.seg = 13 * unit
+        self.stroke = max(1.4, 2.4 * self.u)
+        self.amp = 1.5 * self.u
+        self.seg = 13 * self.u
         self.rng = random.Random(0)
 
-    # coordinate transform
+    # coordinate transform (anisotropic)
     def T(self, x: float, y: float) -> Point:
-        return (x * self.unit + self.ox, y * self.unit + self.oy)
+        return (x * self.ux + self.ox, y * self.uy + self.oy)
 
     # --- rough path utilities (input already in output px) ---
     def _roughen(self, pts: Sequence[Point], closed: bool, seed: int,
@@ -256,7 +258,7 @@ class _Drawer:
 
     # --- draw a rich-text block centred at output (cx, cy) ---
     def text_block(self, blk: Block, cx: float, cy: float, weight: int, color: str):
-        u = self.unit
+        u = self.u
         size_px = getattr(blk, "size", 24) * u
         font = get_font(weight, size_px)
         fill = hex_rgba(color)
@@ -282,12 +284,12 @@ class _Drawer:
                         color: str, halo=(255, 255, 255)):
         """Draw a label with a soft white knockout so it reads over any line
         (no boxy pill)."""
-        u = self.unit
+        u = self.u
         pad = int(round(5 * u)) + 2
         w = max(1, int(math.ceil(blk.w * u)) + 2 * pad)
         h = max(1, int(math.ceil(blk.h * u)) + 2 * pad)
         tile = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        sub = _Drawer(tile, u, 0, 0, self.accent)
+        sub = _Drawer(tile, u, u, 0, 0, self.accent)
         sub.text_block(blk, w / 2, h / 2, weight, color)
         # build a dilated, blurred white halo from the text's alpha
         r = max(1, int(round(2.4 * u)))
@@ -361,9 +363,10 @@ def _shape_points(shape: Shape, cx, cy, w, h):
 # ---------------------------------------------------------------------------
 # Scene assembly
 # ---------------------------------------------------------------------------
-def _draw_scene(diagram: Diagram, layout, blocks, unit: float,
+def _draw_scene(diagram: Diagram, layout, blocks, ux: float, uy: float,
                 ox: float, oy: float, img: Image.Image) -> None:
-    dr = _Drawer(img, unit, ox, oy, diagram.accent)
+    dr = _Drawer(img, ux, uy, ox, oy, diagram.accent)
+    unit = dr.u  # uniform scale for scalar sizes (text, dashes, offsets...)
     node_meta = {n.id: n for n in diagram.nodes}
     group_meta = {g.id: g for g in diagram.groups}
     group_color = {g.id: g.color for g in diagram.groups}
@@ -502,7 +505,7 @@ def _draw_scene(diagram: Diagram, layout, blocks, unit: float,
         else:
             fill = PALETTE[_hash(nid) % len(PALETTE)]
         cx, cy = dr.T(pn.x, pn.y)
-        w, h = pn.w * unit, pn.h * unit
+        w, h = pn.w * dr.ux, pn.h * dr.uy
         obstacles.append((cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2))
         seed = _hash(nid) & 255
         fill_rgba = hex_rgba(fill, 235)
@@ -598,21 +601,6 @@ _ROTATE = {Direction.TB: Direction.LR, Direction.LR: Direction.TB,
            Direction.BT: Direction.RL, Direction.RL: Direction.BT}
 
 
-def _stretch_vertical(layout, factor: float, top: float = 0.0) -> None:
-    """Spread everything out along Y by ``factor`` (node sizes unchanged) so a
-    short diagram fills the vertical length of a tall frame."""
-    def sy(y):
-        return top + (y - top) * factor
-    for pn in layout.nodes.values():
-        pn.y = sy(pn.y)
-    for e in layout.edges:
-        e.points = [(x, sy(y)) for (x, y) in e.points]
-    for g in layout.groups:
-        y0, y1 = sy(g.y), sy(g.y + g.h)
-        g.y, g.h = y0, y1 - y0
-    layout.height = sy(layout.height)
-
-
 def _scene_size(layout, title_block, fs):
     top = (title_block.h + fs * 1.1) if title_block else 0.0
     scene_w = max(layout.width, title_block.w if title_block else 0)
@@ -658,44 +646,27 @@ def render_png_bytes(diagram: Diagram, width: int = 1080, height: int = 1920,
     diagram.direction = chosen
 
     # extra margin so bowed arcs / floated labels never clip at the edge
-    B = fs * 1.9
-
-    # Use the full vertical length: if the frame is taller than the diagram
-    # needs (width is the binding dimension), spread the rows vertically to
-    # fill the height instead of leaving slack.
-    fit_w = (fw - 2 * pad) / (scene_w + 2 * B)
-    fit_h = (fh - 2 * pad) / (scene_h + 2 * B)
-    if fit_h > fit_w * 1.02:
-        target_h = (fh - 2 * pad) / fit_w - 2 * B
-        factor = min(target_h / scene_h, 2.4)
-        if factor > 1.0:
-            _stretch_vertical(layout, factor)
-            scene_w, scene_h, top = _scene_size(layout, title_block, fs)
-
+    B = fs * 1.3
     diagram_ox = (scene_w - layout.width) / 2
     total_w, total_h = scene_w + 2 * B, scene_h + 2 * B
-    fit = min((fw - 2 * pad) / total_w, (fh - 2 * pad) / total_h)
 
+    # Make the nodes as BIG as possible: scale X and Y independently to fill the
+    # frame in both dimensions, capped so shapes are not distorted too much.
     ss = max(1, supersample)
-    unit = fit * ss
-    scene_px_w = int(math.ceil(total_w * unit)) + 2
-    scene_px_h = int(math.ceil(total_h * unit)) + 2
+    sx = (fw - 2 * pad) / total_w
+    sy = (fh - 2 * pad) / total_h
+    base = min(sx, sy)
+    cap = 1.35
+    sx = min(sx, base * cap)
+    sy = min(sy, base * cap)
+    ux, uy = sx * ss, sy * ss
+
+    scene_px_w = int(math.ceil(total_w * ux)) + 2
+    scene_px_h = int(math.ceil(total_h * uy)) + 2
 
     scene = Image.new("RGBA", (scene_px_w, scene_px_h), (0, 0, 0, 0))
-    _draw_scene(diagram, layout, blocks, unit,
-                ox=(B + diagram_ox) * unit, oy=(B + top) * unit, img=scene)
-
-    # title
-    if title_block is not None:
-        tdr = _Drawer(scene, unit, 0, 0, diagram.accent)
-        tcx = (B + scene_w / 2) * unit
-        tdr.text_block(title_block, tcx, (B + title_block.h / 2 + fs * 0.2) * unit,
-                       700, diagram.accent)
-        # little underline flourish
-        uw = title_block.w * unit * 0.6
-        uy = (B + title_block.h + fs * 0.25) * unit
-        tdr.stroke_path([(tcx - uw / 2, uy), (tcx + uw / 2, uy)],
-                        hex_rgba(diagram.accent, 140), width=max(1, 2 * unit), passes=1)
+    _draw_scene(diagram, layout, blocks, ux, uy,
+                ox=(B + diagram_ox) * ux, oy=(B + top) * uy, img=scene)
 
     # downsample supersample
     if ss > 1:

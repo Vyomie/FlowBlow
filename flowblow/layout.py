@@ -24,9 +24,9 @@ from .models import Diagram, Direction, Edge, Node, Shape
 # ---------------------------------------------------------------------------
 # Tunable spacing constants (pixels)
 # ---------------------------------------------------------------------------
-LAYER_GAP = 95          # spacing between successive layers (along main axis)
-SIBLING_GAP = 50        # min spacing between nodes inside the same layer
-GROUP_GAP = 80          # extra spacing between nodes of different groups
+LAYER_GAP = 60          # spacing between successive layers (along main axis)
+SIBLING_GAP = 44        # min spacing between nodes inside the same layer
+GROUP_GAP = 64          # extra spacing between nodes of different groups
 COMPONENT_GAP = 80      # spacing between disconnected components
 DUMMY_SIZE = 2          # cross-extent of a virtual routing node
 MARGIN = 24             # outer canvas margin (kept small; PNG fit adds framing)
