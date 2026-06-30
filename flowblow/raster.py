@@ -15,7 +15,7 @@ from typing import List, Optional, Sequence, Tuple
 from PIL import Image, ImageDraw, ImageFilter
 
 from .content import Block, get_font, layout_block, render_emoji
-from .layout import PlacedNode, layout_diagram
+from .layout import PlacedNode, layout_clustered, layout_diagram
 from .mathtex import render_math
 from .models import Diagram, Direction, EdgeStyle, Shape
 
@@ -598,6 +598,21 @@ _ROTATE = {Direction.TB: Direction.LR, Direction.LR: Direction.TB,
            Direction.BT: Direction.RL, Direction.RL: Direction.BT}
 
 
+def _stretch_vertical(layout, factor: float, top: float = 0.0) -> None:
+    """Spread everything out along Y by ``factor`` (node sizes unchanged) so a
+    short diagram fills the vertical length of a tall frame."""
+    def sy(y):
+        return top + (y - top) * factor
+    for pn in layout.nodes.values():
+        pn.y = sy(pn.y)
+    for e in layout.edges:
+        e.points = [(x, sy(y)) for (x, y) in e.points]
+    for g in layout.groups:
+        y0, y1 = sy(g.y), sy(g.y + g.h)
+        g.y, g.h = y0, y1 - y0
+    layout.height = sy(layout.height)
+
+
 def _scene_size(layout, title_block, fs):
     top = (title_block.h + fs * 1.1) if title_block else 0.0
     scene_w = max(layout.width, title_block.w if title_block else 0)
@@ -633,7 +648,7 @@ def render_png_bytes(diagram: Diagram, width: int = 1080, height: int = 1920,
     best = None
     for direction in candidates:
         diagram.direction = direction
-        cand_layout = layout_diagram(diagram, measure=measure)
+        cand_layout = layout_clustered(diagram, measure=measure)
         sw, sh, top = _scene_size(cand_layout, title_block, fs)
         cand_fit = min((fw - 2 * pad) / sw, (fh - 2 * pad) / sh)
         if best is None or cand_fit > best[0] + 1e-9:
@@ -641,10 +656,23 @@ def render_png_bytes(diagram: Diagram, width: int = 1080, height: int = 1920,
 
     fit, chosen, layout, scene_w, scene_h, top = best
     diagram.direction = chosen
-    diagram_ox = (scene_w - layout.width) / 2
 
     # extra margin so bowed arcs / floated labels never clip at the edge
     B = fs * 1.9
+
+    # Use the full vertical length: if the frame is taller than the diagram
+    # needs (width is the binding dimension), spread the rows vertically to
+    # fill the height instead of leaving slack.
+    fit_w = (fw - 2 * pad) / (scene_w + 2 * B)
+    fit_h = (fh - 2 * pad) / (scene_h + 2 * B)
+    if fit_h > fit_w * 1.02:
+        target_h = (fh - 2 * pad) / fit_w - 2 * B
+        factor = min(target_h / scene_h, 2.4)
+        if factor > 1.0:
+            _stretch_vertical(layout, factor)
+            scene_w, scene_h, top = _scene_size(layout, title_block, fs)
+
+    diagram_ox = (scene_w - layout.width) / 2
     total_w, total_h = scene_w + 2 * B, scene_h + 2 * B
     fit = min((fw - 2 * pad) / total_w, (fh - 2 * pad) / total_h)
 

@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from .models import Diagram, Direction, Shape
+from .models import Diagram, Direction, Edge, Node, Shape
 
 # ---------------------------------------------------------------------------
 # Tunable spacing constants (pixels)
@@ -555,3 +555,118 @@ def layout_diagram(diagram: Diagram, measure=None) -> Layout:
     eng.order_layers()
     eng.assign_cross()
     return eng.finalize()
+
+
+# ---------------------------------------------------------------------------
+# Nested-cluster layout: each group is laid out as a self-contained unit, the
+# groups (as super-nodes) + the ungrouped nodes are arranged together, then the
+# group internals are dropped back in. This makes every cluster a fully
+# disjoint region.
+# ---------------------------------------------------------------------------
+def _sublayout(diagram: Diagram, member_ids, sizes, node_by_id) -> Layout:
+    mset = set(member_ids)
+    nodes = [node_by_id[i] for i in member_ids]
+    edges = [e for e in diagram.edges if e.source in mset and e.target in mset]
+    sub = Diagram(nodes=nodes, edges=edges, groups=[],
+                  direction=diagram.direction, font_size=diagram.font_size)
+    return layout_diagram(sub, measure=lambda n, fs: sizes[n.id])
+
+
+def layout_clustered(diagram: Diagram, measure=None) -> Layout:
+    if measure is None:
+        def measure(n, fs):
+            w, h, _ = estimate_size(n.label, n.shape, fs, bool(n.icon))
+            return w, h
+
+    node_by_id = {n.id: n for n in diagram.nodes}
+    active = [g for g in diagram.groups
+              if any(n.group == g.id for n in diagram.nodes)]
+    if not active:
+        return layout_diagram(diagram, measure=measure)
+
+    sizes = {n.id: measure(n, diagram.font_size) for n in diagram.nodes}
+    members = {g.id: [n.id for n in diagram.nodes if n.group == g.id] for g in active}
+    grouped = {i for ids in members.values() for i in ids}
+    ungrouped = [n for n in diagram.nodes if n.id not in grouped]
+
+    # 1. lay each group out on its own
+    sub: Dict[str, Layout] = {}
+    gsize: Dict[str, Tuple[float, float]] = {}
+    for g in active:
+        s = _sublayout(diagram, members[g.id], sizes, node_by_id)
+        sub[g.id] = s
+        gsize[g.id] = (s.width + 2 * GROUP_PAD, s.height + 2 * GROUP_PAD)
+
+    # 2. arrange groups (as super-nodes) + ungrouped nodes
+    def rep(nid: str) -> str:
+        grp = node_by_id[nid].group
+        return f"__g_{grp}" if grp in members else nid
+
+    qnodes = [Node(id=f"__g_{g.id}", label=g.id) for g in active] + list(ungrouped)
+    qsize = {f"__g_{g.id}": gsize[g.id] for g in active}
+    qsize.update({n.id: sizes[n.id] for n in ungrouped})
+    seen, qedges = set(), []
+    for e in diagram.edges:
+        if e.source not in node_by_id or e.target not in node_by_id:
+            continue
+        a, b = rep(e.source), rep(e.target)
+        if a == b or (a, b) in seen:
+            continue
+        seen.add((a, b))
+        qedges.append(Edge(source=a, target=b))
+    quotient = Diagram(nodes=qnodes, edges=qedges, groups=[],
+                       direction=diagram.direction, font_size=diagram.font_size)
+    ql = layout_diagram(quotient, measure=lambda n, fs: qsize[n.id])
+
+    # 3. drop group internals back in, centred on their super-node
+    placed: Dict[str, PlacedNode] = {}
+    for g in active:
+        sup = ql.nodes[f"__g_{g.id}"]
+        s = sub[g.id]
+        ox, oy = sup.x - s.width / 2, sup.y - s.height / 2
+        for nid, pn in s.nodes.items():
+            placed[nid] = PlacedNode(id=nid, x=ox + pn.x, y=oy + pn.y,
+                                     w=pn.w, h=pn.h, lines=pn.lines)
+    for n in ungrouped:
+        if n.id in ql.nodes:
+            placed[n.id] = ql.nodes[n.id]
+
+    # 4. straight edges between real node centres
+    pedges: List[PlacedEdge] = []
+    for e in diagram.edges:
+        if e.source in placed and e.target in placed:
+            ps, pt = placed[e.source], placed[e.target]
+            pedges.append(PlacedEdge(source=e.source, target=e.target,
+                                     points=[(ps.x, ps.y), (pt.x, pt.y)], reversed=False))
+
+    # 5. group boxes from their (now contiguous) members
+    gplaced: List[PlacedGroup] = []
+    for g in active:
+        ids = [i for i in members[g.id] if i in placed]
+        if not ids:
+            continue
+        x0 = min(placed[i].x - placed[i].w / 2 for i in ids) - GROUP_PAD
+        y0 = min(placed[i].y - placed[i].h / 2 for i in ids) - GROUP_PAD
+        x1 = max(placed[i].x + placed[i].w / 2 for i in ids) + GROUP_PAD
+        y1 = max(placed[i].y + placed[i].h / 2 for i in ids) + GROUP_PAD
+        gplaced.append(PlacedGroup(id=g.id, x=x0, y=y0, w=x1 - x0, h=y1 - y0))
+
+    # 6. normalise to a positive canvas, leaving room above for group labels
+    label_room = diagram.font_size * 1.7
+    minx = min([p.x - p.w / 2 for p in placed.values()]
+               + [g.x for g in gplaced]) - MARGIN
+    miny = min([p.y - p.h / 2 for p in placed.values()]
+               + [g.y - label_room for g in gplaced]) - MARGIN
+    dx, dy = -minx, -miny
+    for p in placed.values():
+        p.x += dx
+        p.y += dy
+    for e in pedges:
+        e.points = [(x + dx, y + dy) for (x, y) in e.points]
+    for g in gplaced:
+        g.x += dx
+        g.y += dy
+    maxx = max([p.x + p.w / 2 for p in placed.values()] + [g.x + g.w for g in gplaced])
+    maxy = max([p.y + p.h / 2 for p in placed.values()] + [g.y + g.h for g in gplaced])
+    return Layout(width=maxx + MARGIN, height=maxy + MARGIN,
+                  nodes=placed, edges=pedges, groups=gplaced)
