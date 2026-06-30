@@ -663,8 +663,51 @@ def layout_clustered(diagram: Diagram, measure=None) -> Layout:
     if not active:
         return layout_diagram(diagram, measure=measure)
 
+    # Two passes: lay out once, then re-order each cluster's members so they sit
+    # in the same left/right order as the external neighbours they connect to
+    # (cuts crossings -- e.g. put the DB that talks to the right-hand service on
+    # the right). The second pass uses those orders.
+    first = _clustered_impl(diagram, measure, node_by_id, active, None)
+    neigh: Dict[str, set] = {n.id: set() for n in diagram.nodes}
+    for e in diagram.edges:
+        if e.source in neigh and e.target in neigh:
+            neigh[e.source].add(e.target)
+            neigh[e.target].add(e.source)
+    members = {g.id: [n.id for n in diagram.nodes if n.group == g.id] for g in active}
+    internal = {g.id: sum(1 for e in diagram.edges
+                          if node_by_id.get(e.source) and node_by_id.get(e.target)
+                          and node_by_id[e.source].group == g.id
+                          and node_by_id[e.target].group == g.id)
+                for g in active}
+    horizontal = diagram.direction in (Direction.LR, Direction.RL)
+    order_hint: Dict[str, list] = {}
+    for g in active:
+        gid = g.id
+        # Only re-order clusters that are just a SET of independent nodes (no
+        # internal edges) -- there the order is otherwise arbitrary, so align it
+        # with the external neighbours. Clusters with internal structure keep
+        # their own layout.
+        if internal[gid] != 0:
+            continue
+
+        def ext_key(m):
+            ns = [first.nodes[o] for o in neigh[m]
+                  if o in first.nodes and node_by_id[o].group != gid]
+            if not ns:
+                p = first.nodes[m]
+                return p.y if horizontal else p.x
+            return (sum(p.y for p in ns) / len(ns) if horizontal
+                    else sum(p.x for p in ns) / len(ns))
+        order_hint[gid] = sorted(members[gid], key=ext_key)
+    return _clustered_impl(diagram, measure, node_by_id, active, order_hint)
+
+
+def _clustered_impl(diagram, measure, node_by_id, active, order_hint) -> Layout:
     sizes = {n.id: measure(n, diagram.font_size) for n in diagram.nodes}
     members = {g.id: [n.id for n in diagram.nodes if n.group == g.id] for g in active}
+    if order_hint:
+        for gid, ordered in order_hint.items():
+            members[gid] = ordered
     grouped = {i for ids in members.values() for i in ids}
     ungrouped = [n for n in diagram.nodes if n.id not in grouped]
 
