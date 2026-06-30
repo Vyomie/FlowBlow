@@ -479,25 +479,49 @@ def _draw_scene(diagram: Diagram, layout, blocks, unit: float,
         dr.text_block(blk, cx, cy, 600, diagram.accent)
 
     # --- edge labels on top (soft halo, no boxy pill) ---
-    def _overlaps(cx, cy, hw, hh):
+    def _clearance(cx, cy, hw, hh):
+        """Signed distance from the label rect to the NEAREST obstacle.
+        Positive = that much empty space around it; negative = overlapping."""
+        best = 1e18
         for (x0, y0, x1, y1) in obstacles:
-            if cx + hw > x0 and cx - hw < x1 and cy + hh > y0 and cy - hh < y1:
-                return True
-        return False
+            dx = max(x0 - (cx + hw), (cx - hw) - x1, 0.0)
+            dy = max(y0 - (cy + hh), (cy - hh) - y1, 0.0)
+            if dx > 0 or dy > 0:
+                dist = math.hypot(dx, dy)
+            else:  # overlapping -> negative penetration depth
+                dist = -min((cx + hw) - x0, x1 - (cx - hw),
+                            (cy + hh) - y0, y1 - (cy - hh))
+            best = min(best, dist)
+        return best
 
     for lb, mid, perp in deferred_labels:
         hw, hh = lb.w * unit / 2, lb.h * unit / 2
-        # Sit at the MIDDLE of the line, just beside it. Offset perpendicular by
-        # half the label height so the text clears the stroke; prefer the
-        # "upper" side, flip to the other only if that side is blocked.
-        off = hh + 5 * unit
-        best = (mid[0] + perp[0] * off, mid[1] + perp[1] * off)
+        # Keep the label at the MIDDLE of the line, beside it. On each side,
+        # step out from the line just far enough to clear any node; then prefer
+        # the side that clears with the least travel (i.e. the open side).
+        base = hh + 6 * unit
+        step = hh * 0.8
+        margin = 2 * unit
+        cands = []  # (cleared?, offset_used, score, pos)
         for sign in (1, -1):
-            cx = mid[0] + perp[0] * sign * off
-            cy = mid[1] + perp[1] * sign * off
-            if not _overlaps(cx, cy, hw + 1 * unit, hh):
-                best = (cx, cy)
-                break
+            o = base
+            chosen = (mid[0] + perp[0] * sign * o, mid[1] + perp[1] * sign * o)
+            sc_best = _clearance(*chosen, hw, hh)
+            cleared, off_used = sc_best >= margin, o
+            for _ in range(6):
+                cx = mid[0] + perp[0] * sign * o
+                cy = mid[1] + perp[1] * sign * o
+                sc = _clearance(cx, cy, hw, hh)
+                if sc >= margin:
+                    chosen, off_used, cleared = (cx, cy), o, True
+                    break
+                if sc > sc_best:
+                    sc_best, chosen, off_used = sc, (cx, cy), o
+                o += step
+            cands.append((cleared, off_used, sc_best, chosen))
+        clears = [c for c in cands if c[0]]
+        best = (min(clears, key=lambda c: c[1])[3] if clears
+                else max(cands, key=lambda c: c[2])[3])
         # keep the label fully inside the canvas so it never clips at the edge
         W, H = dr.img.size
         bx = min(max(best[0], hw + 4), W - hw - 4)
