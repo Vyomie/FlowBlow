@@ -595,30 +595,51 @@ def _seg_hits_box(a, b, box, samples: int = 40) -> bool:
 
 
 def _route_around(a, b, boxes):
-    """Route a-b as a poly-line that detours around obstacle boxes (so edges
-    never pass behind nodes). Each box is (x0,y0,x1,y1), already inflated."""
-    path = [a, b]
-    for _ in range(10):
-        hit = None
-        for i in range(len(path) - 1):
-            for box in boxes:
-                if _seg_hits_box(path[i], path[i + 1], box):
-                    hit = (i, box)
-                    break
-            if hit:
-                break
-        if not hit:
+    """Shortest poly-line from a to b that never passes through an obstacle box
+    (so edges never go behind a node). Visibility-graph + Dijkstra over the box
+    corners. Boxes are (x0,y0,x1,y1), already inflated."""
+    import heapq
+
+    if not any(_seg_hits_box(a, b, bx) for bx in boxes):
+        return [a, b]
+
+    pad = 1.0
+    nodes = [a, b]
+    for (x0, y0, x1, y1) in boxes:
+        nodes += [(x0 - pad, y0 - pad), (x1 + pad, y0 - pad),
+                  (x1 + pad, y1 + pad), (x0 - pad, y1 + pad)]
+
+    def visible(p, q):
+        return not any(_seg_hits_box(p, q, bx) for bx in boxes)
+
+    n = len(nodes)
+    dist = [math.inf] * n
+    prev = [-1] * n
+    dist[0] = 0.0
+    pq = [(0.0, 0)]
+    while pq:
+        d, u = heapq.heappop(pq)
+        if d > dist[u]:
+            continue
+        if u == 1:
             break
-        i, (x0, y0, x1, y1) = hit
-        p, q = path[i], path[i + 1]
-        # detour through whichever box corner adds the least length
-        corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
-        best = min(corners, key=lambda c: math.hypot(c[0] - p[0], c[1] - p[1])
-                   + math.hypot(q[0] - c[0], q[1] - c[1]))
-        if best in path:           # avoid an infinite loop
-            break
-        path.insert(i + 1, best)
-    return path
+        for v in range(n):
+            if v == u:
+                continue
+            if visible(nodes[u], nodes[v]):
+                w = math.hypot(nodes[v][0] - nodes[u][0], nodes[v][1] - nodes[u][1])
+                if d + w < dist[v]:
+                    dist[v] = d + w
+                    prev[v] = u
+                    heapq.heappush(pq, (d + w, v))
+
+    if dist[1] is math.inf or prev[1] == -1:
+        return [a, b]
+    path, v = [], 1
+    while v != -1:
+        path.append(nodes[v])
+        v = prev[v]
+    return list(reversed(path))
 
 
 def _sublayout(diagram: Diagram, member_ids, sizes, node_by_id) -> Layout:
@@ -691,7 +712,7 @@ def layout_clustered(diagram: Diagram, measure=None) -> Layout:
 
     # 4. edges between real node centres, routed AROUND other nodes so a line
     #    never passes behind a node.
-    inflate = SIBLING_GAP * 0.45
+    inflate = SIBLING_GAP * 0.7
     boxes = {nid: (p.x - p.w / 2 - inflate, p.y - p.h / 2 - inflate,
                    p.x + p.w / 2 + inflate, p.y + p.h / 2 + inflate)
              for nid, p in placed.items()}

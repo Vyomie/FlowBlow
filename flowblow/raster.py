@@ -148,6 +148,23 @@ def _mid_and_tangent(pts):
     return pts[len(pts) // 2], (pts[-1][0] - pts[0][0], pts[-1][1] - pts[0][1])
 
 
+def _chaikin(pts, iters: int = 3) -> List[Point]:
+    """Corner-cutting smoothing that stays INSIDE the control polyline (unlike a
+    Catmull spline it never overshoots), so a routed edge can't bulge back into
+    a node. Endpoints are preserved."""
+    pts = list(pts)
+    if len(pts) < 3:
+        return pts
+    for _ in range(iters):
+        out = [pts[0]]
+        for a, b in zip(pts, pts[1:]):
+            out.append((0.75 * a[0] + 0.25 * b[0], 0.75 * a[1] + 0.25 * b[1]))
+            out.append((0.25 * a[0] + 0.75 * b[0], 0.25 * a[1] + 0.75 * b[1]))
+        out.append(pts[-1])
+        pts = out
+    return pts
+
+
 def _dash(points: Sequence[Point], on: float, off: float) -> List[List[Point]]:
     """Split a polyline into dash sub-polylines by arc length."""
     if on <= 0:
@@ -447,7 +464,7 @@ def _draw_scene(diagram: Diagram, layout, blocks, ux: float, uy: float,
             control[0] = _border_point(src, control[1], inset_s)
             control[-1] = _border_point(tgt, control[-2], inset_t)
 
-        sampled = [dr.T(*p) for p in _catmull(control, samples=22)]
+        sampled = [dr.T(*p) for p in _chaikin(control, iters=3)]
         color = hex_rgba(spec.color) if spec.color else dr.ink
         seed = _hash(e.source + e.target) & 255
         # jitter the whole curve ONCE, then dash that single wavy path so the
