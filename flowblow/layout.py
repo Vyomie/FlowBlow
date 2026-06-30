@@ -699,10 +699,12 @@ def layout_clustered(diagram: Diagram, measure=None) -> Layout:
 
     # 3. drop group internals back in, centred on their super-node
     placed: Dict[str, PlacedNode] = {}
+    offset: Dict[str, Tuple[float, float]] = {}
     for g in active:
         sup = ql.nodes[f"__g_{g.id}"]
         s = sub[g.id]
         ox, oy = sup.x - s.width / 2, sup.y - s.height / 2
+        offset[g.id] = (ox, oy)
         for nid, pn in s.nodes.items():
             placed[nid] = PlacedNode(id=nid, x=ox + pn.x, y=oy + pn.y,
                                      w=pn.w, h=pn.h, lines=pn.lines)
@@ -710,20 +712,34 @@ def layout_clustered(diagram: Diagram, measure=None) -> Layout:
         if n.id in ql.nodes:
             placed[n.id] = ql.nodes[n.id]
 
-    # 4. edges between real node centres, routed AROUND other nodes so a line
-    #    never passes behind a node.
+    # 4. edges.
+    #    * intra-cluster edges reuse the cluster's OWN sub-layout routing (it
+    #      already routes back-edges cleanly through dummy columns) -- placement
+    #      and routing stay consistent.
+    #    * inter-cluster / ungrouped edges are routed around node boxes at the
+    #      top level so they never pass behind a node.
     inflate = SIBLING_GAP * 0.7
     boxes = {nid: (p.x - p.w / 2 - inflate, p.y - p.h / 2 - inflate,
                    p.x + p.w / 2 + inflate, p.y + p.h / 2 + inflate)
              for nid, p in placed.items()}
     pedges: List[PlacedEdge] = []
+    for g in active:
+        ox, oy = offset[g.id]
+        for se in sub[g.id].edges:
+            pts = [(x + ox, y + oy) for (x, y) in se.points]
+            pedges.append(PlacedEdge(source=se.source, target=se.target,
+                                     points=pts, reversed=se.reversed))
     for e in diagram.edges:
-        if e.source in placed and e.target in placed:
-            ps, pt = placed[e.source], placed[e.target]
-            obstacles = [b for nid, b in boxes.items() if nid not in (e.source, e.target)]
-            pts = _route_around((ps.x, ps.y), (pt.x, pt.y), obstacles)
-            pedges.append(PlacedEdge(source=e.source, target=e.target,
-                                     points=pts, reversed=False))
+        if e.source not in placed or e.target not in placed:
+            continue
+        sg, tg = node_by_id[e.source].group, node_by_id[e.target].group
+        if sg is not None and sg == tg:
+            continue  # intra-cluster, already added from the sub-layout
+        ps, pt = placed[e.source], placed[e.target]
+        obstacles = [b for nid, b in boxes.items() if nid not in (e.source, e.target)]
+        pts = _route_around((ps.x, ps.y), (pt.x, pt.y), obstacles)
+        pedges.append(PlacedEdge(source=e.source, target=e.target,
+                                 points=pts, reversed=False))
 
     # 5. group boxes from their (now contiguous) members
     gplaced: List[PlacedGroup] = []

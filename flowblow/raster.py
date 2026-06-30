@@ -415,8 +415,22 @@ def _draw_scene(diagram: Diagram, layout, blocks, ux: float, uy: float,
     # --- edges --- (labels are deferred so nodes never hide them)
     deferred_labels: list = []  # (block, mid, perp, color, weight)
     round_shapes = (Shape.ellipse, Shape.circle, Shape.diamond)
-    valid = [e for e in diagram.edges
-             if e.source in layout.nodes and e.target in layout.nodes]
+    # Match each placed edge to its diagram spec by endpoints (layout may emit
+    # edges in a different order than the spec, e.g. clustered routing).
+    pair_specs: dict = {}
+    for e in diagram.edges:
+        pair_specs.setdefault((e.source, e.target), []).append(e)
+    _used: dict = {}
+    specs = []
+    for le in layout.edges:
+        key = (le.source, le.target)
+        lst = pair_specs.get(key)
+        if lst:
+            i = _used.get(key, 0)
+            specs.append(lst[min(i, len(lst) - 1)])
+            _used[key] = i + 1
+        else:
+            specs.append(None)
 
     # Bow parallel / back edges apart so they each get their own arc instead of
     # overlapping on the same line.
@@ -442,7 +456,10 @@ def _draw_scene(diagram: Diagram, layout, blocks, ux: float, uy: float,
         dr.d.polygon([tip, (base[0] + px * half, base[1] + py * half),
                       (base[0] - px * half, base[1] - py * half)], fill=color)
 
-    for k, (spec, e) in enumerate(zip(valid, layout.edges)):
+    for k, e in enumerate(layout.edges):
+        spec = specs[k]
+        if spec is None:
+            continue
         src, tgt = layout.nodes[e.source], layout.nodes[e.target]
         s_meta, t_meta = node_meta.get(e.source), node_meta.get(e.target)
         inset_s = 0.94 if (s_meta and s_meta.shape in round_shapes) else 1.0
