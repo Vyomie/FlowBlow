@@ -1,0 +1,16 @@
+{
+  "title": "Make Tea",
+  "direction": "LR",
+  "nodes": [
+    {"id": "a", "label": "Boil water", "shape": "stadium"},
+    {"id": "b", "label": "Add tea bag"},
+    {"id": "c", "label": "Steep 3 min?", "shape": "diamond"},
+    {"id": "d", "label": "Pour & enjoy", "shape": "stadium", "icon": "🍵"}
+  ],
+  "edges": [
+    {"from": "a", "to": "b"},
+    {"from": "b", "to": "c"},
+    {"from": "c", "to": "b", "label": "not yet", "style": "dashed"},
+    {"from": "c", "to": "d", "label": "yes"}
+  ]
+}

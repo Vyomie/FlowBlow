@@ -1,0 +1,20 @@
+{
+  "title": "Gradient Descent",
+  "direction": "TB",
+  "nodes": [
+    {"id": "start", "label": "Start", "shape": "stadium", "color": "#caffbf"},
+    {"id": "init", "label": "Initialise $\\theta_0$, learning rate $\\eta$"},
+    {"id": "grad", "label": "Compute gradient $\\nabla_\\theta J(\\theta)$"},
+    {"id": "update", "label": "Update $\\theta \\leftarrow \\theta - \\eta \\, \\nabla_\\theta J(\\theta)$"},
+    {"id": "check", "label": "Converged? $\\|\\nabla J\\| < \\epsilon$", "shape": "diamond", "color": "#fdffb6"},
+    {"id": "done", "label": "Return $\\theta^{*}$", "shape": "stadium", "color": "#ffadad"}
+  ],
+  "edges": [
+    {"from": "start", "to": "init"},
+    {"from": "init", "to": "grad"},
+    {"from": "grad", "to": "update"},
+    {"from": "update", "to": "check"},
+    {"from": "check", "to": "grad", "label": "no", "style": "dashed"},
+    {"from": "check", "to": "done", "label": "yes"}
+  ]
+}

@@ -1,0 +1,519 @@
+"""Pure-Python (Pillow) renderer: draw a FlowBlow diagram straight to a PNG.
+
+No browser, no HTML.  Shapes, edges and arrows are drawn with a hand-drawn
+"rough" wobble (jittered, double-stroked paths), text uses the Caveat font,
+and LaTeX is rasterised by :mod:`flowblow.mathtex` and composited in.  The
+whole diagram is scaled to fill a 16:9 (or any) frame, on a transparent
+background by default.
+"""
+from __future__ import annotations
+
+import math
+import random
+from typing import List, Optional, Sequence, Tuple
+
+from PIL import Image, ImageDraw
+
+from .content import Block, get_font, layout_block, render_emoji
+from .layout import PlacedNode, layout_diagram
+from .mathtex import render_math
+from .models import Diagram, EdgeStyle, Shape
+
+# ---- palette (shared look with the HTML renderer) -------------------------
+PALETTE = [
+    "#ffd6a5", "#fdffb6", "#caffbf", "#9bf6ff",
+    "#a0c4ff", "#bdb2ff", "#ffc6ff", "#ffadad",
+    "#b9fbc0", "#fde4cf", "#cfbaf0", "#a3c4f3",
+]
+
+Point = Tuple[float, float]
+
+
+def _hash(s: str) -> int:
+    h = 2166136261
+    for ch in s:
+        h = (h ^ ord(ch)) * 16777619 & 0xFFFFFFFF
+    return h
+
+
+def hex_rgba(col: str, alpha: int = 255) -> Tuple[int, int, int, int]:
+    col = (col or "#cccccc").strip()
+    if not col.startswith("#"):
+        return (200, 200, 200, alpha)
+    h = col.lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    try:
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    except ValueError:
+        return (200, 200, 200, alpha)
+    return (r, g, b, alpha)
+
+
+# ---------------------------------------------------------------------------
+# Content measurement (drives node sizing in the layout engine)
+# ---------------------------------------------------------------------------
+def _node_block(node, font_size: float) -> Block:
+    maxw = font_size * 11.0
+    blk = layout_block(node.label, size=font_size, weight=600,
+                       max_width=maxw, icon=node.icon)
+    blk.size = font_size
+    return blk
+
+
+def _inflate(bw: float, bh: float, shape: Shape, fs: float) -> Tuple[float, float]:
+    pad_x, pad_y = fs * 0.95, fs * 0.6
+    w, h = bw + 2 * pad_x, bh + 2 * pad_y
+    if shape == Shape.diamond:
+        w, h = w * 1.5, h * 1.5
+    elif shape == Shape.circle:
+        side = max(w, h) * 1.18
+        w = h = side
+    elif shape == Shape.ellipse:
+        w, h = w * 1.32, h * 1.25
+    elif shape == Shape.hexagon:
+        w *= 1.3
+    elif shape == Shape.parallelogram:
+        w *= 1.26
+    elif shape == Shape.cylinder:
+        h += fs * 0.9
+    elif shape == Shape.cloud:
+        w, h = w * 1.5, h * 1.5
+    elif shape == Shape.note:
+        w += fs * 0.4
+    return max(w, fs * 3.2), max(h, fs * 2.2)
+
+
+# ---------------------------------------------------------------------------
+# Geometry helpers
+# ---------------------------------------------------------------------------
+def _border_point(n: PlacedNode, toward: Point, inset: float) -> Point:
+    cx, cy = n.x, n.y
+    dx, dy = toward[0] - cx, toward[1] - cy
+    if dx == 0 and dy == 0:
+        return cx, cy
+    hw, hh = n.w / 2 * inset, n.h / 2 * inset
+    s = min(hw / abs(dx) if dx else math.inf, hh / abs(dy) if dy else math.inf)
+    return cx + dx * s, cy + dy * s
+
+
+def _catmull(points: Sequence[Point], samples: int = 16) -> List[Point]:
+    """Sample a smooth Catmull-Rom spline through ``points``."""
+    if len(points) <= 2:
+        return list(points)
+    p = [points[0]] + list(points) + [points[-1]]
+    out: List[Point] = [points[0]]
+    for i in range(1, len(p) - 2):
+        p0, p1, p2, p3 = p[i - 1], p[i], p[i + 1], p[i + 2]
+        for s in range(1, samples + 1):
+            t = s / samples
+            t2, t3 = t * t, t * t * t
+            x = 0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t +
+                       (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 +
+                       (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3)
+            y = 0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t +
+                       (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 +
+                       (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
+            out.append((x, y))
+    return out
+
+
+def _dash(points: Sequence[Point], on: float, off: float) -> List[List[Point]]:
+    """Split a polyline into dash sub-polylines by arc length."""
+    if on <= 0:
+        return [list(points)]
+    segs: List[List[Point]] = []
+    cur: List[Point] = []
+    drawing = True
+    remain = on
+    prev = points[0]
+    cur.append(prev)
+    for pt in points[1:]:
+        d = math.hypot(pt[0] - prev[0], pt[1] - prev[1])
+        while d >= remain:
+            t = remain / d if d else 0
+            mid = (prev[0] + (pt[0] - prev[0]) * t, prev[1] + (pt[1] - prev[1]) * t)
+            if drawing:
+                cur.append(mid)
+                segs.append(cur)
+                cur = []
+            else:
+                cur = [mid]
+            drawing = not drawing
+            prev = mid
+            d = math.hypot(pt[0] - prev[0], pt[1] - prev[1])
+            remain = on if drawing else off
+        remain -= d
+        if drawing:
+            cur.append(pt)
+        prev = pt
+    if drawing and len(cur) > 1:
+        segs.append(cur)
+    return segs
+
+
+# ---------------------------------------------------------------------------
+# The drawer -- everything below works in OUTPUT pixels.
+# ---------------------------------------------------------------------------
+class _Drawer:
+    def __init__(self, img: Image.Image, unit: float, ox: float, oy: float, ink: str):
+        self.img = img
+        self.d = ImageDraw.Draw(img)
+        self.unit = unit            # layout units -> output px
+        self.ox, self.oy = ox, oy   # output origin offset
+        self.ink = hex_rgba(ink)
+        self.stroke = max(1.4, 2.4 * unit)
+        self.amp = 1.5 * unit
+        self.seg = 13 * unit
+        self.rng = random.Random(0)
+
+    # coordinate transform
+    def T(self, x: float, y: float) -> Point:
+        return (x * self.unit + self.ox, y * self.unit + self.oy)
+
+    # --- rough path utilities (input already in output px) ---
+    def _roughen(self, pts: Sequence[Point], closed: bool, seed: int) -> List[Point]:
+        rng = random.Random(seed)
+        out: List[Point] = []
+        pairs = list(zip(pts, list(pts[1:]) + ([pts[0]] if closed else [])))
+        for idx, (a, b) in enumerate(pairs):
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            d = math.hypot(dx, dy) or 1.0
+            nx, ny = -dy / d, dx / d
+            k = max(1, int(d / self.seg))
+            for i in range(k):
+                t = i / k
+                fix_end = (not closed) and idx == 0 and i == 0
+                off = 0.0 if fix_end else rng.uniform(-self.amp, self.amp)
+                out.append((a[0] + dx * t + nx * off, a[1] + dy * t + ny * off))
+        if closed:
+            out.append(out[0])
+        else:
+            out.append(pts[-1])
+        return out
+
+    def stroke_path(self, pts: Sequence[Point], color, width=None, closed=False,
+                    seed=0, passes=2):
+        w = width if width is not None else self.stroke
+        for pi in range(passes):
+            rp = self._roughen(pts, closed, seed + pi * 97)
+            self.d.line(rp, fill=color, width=max(1, int(round(w))), joint="curve")
+        # round the joins a touch
+        r = w / 2
+        for (x, y) in (pts[0], pts[-1]):
+            self.d.ellipse([x - r, y - r, x + r, y + r], fill=color)
+
+    def fill_poly(self, pts: Sequence[Point], fill, seed=0):
+        rp = self._roughen(pts, True, seed)
+        self.d.polygon(rp, fill=fill)
+
+    def shape(self, pts: Sequence[Point], fill, seed=0):
+        self.fill_poly(pts, fill, seed)
+        self.stroke_path(list(pts) + [pts[0]], self.ink, closed=False, seed=seed + 5, passes=2)
+
+    # --- composite an image piece (math / emoji) scaled to target height ---
+    def blit(self, piece: Image.Image, cx: float, cy: float, target_h: float):
+        if piece is None or piece.height == 0:
+            return
+        tw = max(1, int(round(piece.width * target_h / piece.height)))
+        th = max(1, int(round(target_h)))
+        rs = piece.resize((tw, th), Image.LANCZOS)
+        self.img.alpha_composite(rs, (int(round(cx - tw / 2)), int(round(cy - th / 2))))
+
+    # --- draw a rich-text block centred at output (cx, cy) ---
+    def text_block(self, blk: Block, cx: float, cy: float, weight: int, color: str):
+        u = self.unit
+        size_px = getattr(blk, "size", 24) * u
+        font = get_font(weight, size_px)
+        fill = hex_rgba(color)
+        total_h = blk.h * u
+        cur_y = cy - total_h / 2
+        spacing = 1.06
+        for ln in blk.lines:
+            line_h = ln.h * u
+            line_w = ln.w * u
+            lx = cx - line_w / 2
+            yc = cur_y + line_h / 2
+            for r in ln.runs:
+                rx = lx + r.x * u
+                if r.kind == "text":
+                    self.d.text((rx, yc), r.payload, font=font, fill=fill, anchor="lm")
+                elif r.kind == "math":
+                    self.blit(render_math(r.payload, color), rx + (r.w * u) / 2, yc, r.h * u)
+                elif r.kind == "icon":
+                    self.blit(render_emoji(r.payload), rx + (r.w * u) / 2, yc, r.h * u)
+            cur_y += line_h * spacing
+
+
+# ---------------------------------------------------------------------------
+# Shape vertex generators (centre cx,cy ; size w,h ; OUTPUT px)
+# ---------------------------------------------------------------------------
+def _ellipse_pts(cx, cy, w, h, n=48):
+    return [(cx + w / 2 * math.cos(2 * math.pi * i / n),
+             cy + h / 2 * math.sin(2 * math.pi * i / n)) for i in range(n)]
+
+
+def _rounded_pts(cx, cy, w, h, r, per=6):
+    hw, hh = w / 2, h / 2
+    r = min(r, hw, hh)
+    cs = [(cx + hw - r, cy + hh - r, 0),
+          (cx - hw + r, cy + hh - r, 90),
+          (cx - hw + r, cy - hh + r, 180),
+          (cx + hw - r, cy - hh + r, 270)]
+    pts = []
+    for ccx, ccy, a0 in cs:
+        for i in range(per + 1):
+            a = math.radians(a0 + 90 * i / per)
+            pts.append((ccx + r * math.cos(a), ccy + r * math.sin(a)))
+    return pts
+
+
+def _cloud_pts(cx, cy, w, h, n=60):
+    pts = []
+    for i in range(n):
+        a = 2 * math.pi * i / n
+        bump = 1 + 0.13 * math.sin(6 * a) + 0.05 * math.sin(11 * a + 1.3)
+        pts.append((cx + (w / 2) * 0.92 * bump * math.cos(a),
+                    cy + (h / 2) * 0.92 * bump * math.sin(a)))
+    return pts
+
+
+def _shape_points(shape: Shape, cx, cy, w, h):
+    hw, hh = w / 2, h / 2
+    x0, y0, x1, y1 = cx - hw, cy - hh, cx + hw, cy + hh
+    if shape == Shape.rect:
+        return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    if shape == Shape.rounded or shape == Shape.note:
+        return _rounded_pts(cx, cy, w, h, min(w, h) * 0.18)
+    if shape == Shape.stadium:
+        return _rounded_pts(cx, cy, w, h, hh)
+    if shape == Shape.ellipse:
+        return _ellipse_pts(cx, cy, w, h)
+    if shape == Shape.circle:
+        return _ellipse_pts(cx, cy, max(w, h), max(w, h))
+    if shape == Shape.diamond:
+        return [(cx, y0), (x1, cy), (cx, y1), (x0, cy)]
+    if shape == Shape.hexagon:
+        k = w * 0.2
+        return [(x0 + k, y0), (x1 - k, y0), (x1, cy), (x1 - k, y1), (x0 + k, y1), (x0, cy)]
+    if shape == Shape.parallelogram:
+        k = w * 0.18
+        return [(x0 + k, y0), (x1, y0), (x1 - k, y1), (x0, y1)]
+    if shape == Shape.cloud:
+        return _cloud_pts(cx, cy, w, h)
+    return _rounded_pts(cx, cy, w, h, min(w, h) * 0.18)
+
+
+# ---------------------------------------------------------------------------
+# Scene assembly
+# ---------------------------------------------------------------------------
+def _draw_scene(diagram: Diagram, layout, blocks, unit: float,
+                ox: float, oy: float, img: Image.Image) -> None:
+    dr = _Drawer(img, unit, ox, oy, diagram.accent)
+    node_meta = {n.id: n for n in diagram.nodes}
+    group_meta = {g.id: g for g in diagram.groups}
+    group_color = {g.id: g.color for g in diagram.groups}
+
+    # --- groups (behind) ---
+    for g in layout.groups:
+        meta = group_meta.get(g.id)
+        col = (meta.color if meta and meta.color else PALETTE[_hash(g.id) % len(PALETTE)])
+        x0, y0 = dr.T(g.x, g.y)
+        x1, y1 = dr.T(g.x + g.w, g.y + g.h)
+        pts = _rounded_pts((x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0, 16 * unit)
+        dr.fill_poly(pts, hex_rgba(col, 28), seed=_hash(g.id) & 255)
+        for piece in _dash([*pts, pts[0]], 5 * unit, 7 * unit):
+            if len(piece) > 1:
+                dr.d.line(piece, fill=hex_rgba(diagram.accent, 120),
+                          width=max(1, int(round(dr.stroke * 0.8))), joint="curve")
+        if meta and meta.label:
+            gb = layout_block(meta.label, size=diagram.font_size * 0.92, weight=700)
+            gb.size = diagram.font_size * 0.92
+            lx = x0 + gb.w * unit / 2 + 10 * unit
+            ly = y0 + gb.h * unit / 2 + 6 * unit
+            dr.d.rectangle([lx - gb.w * unit / 2 - 4 * unit, ly - gb.h * unit / 2,
+                            lx + gb.w * unit / 2 + 4 * unit, ly + gb.h * unit / 2],
+                           fill=(255, 255, 255, 200))
+            dr.text_block(gb, lx, ly, 700, diagram.accent)
+
+    # --- edges --- (labels are deferred so nodes never hide them)
+    deferred_labels: List[Tuple[Block, Point]] = []
+    round_shapes = (Shape.ellipse, Shape.circle, Shape.diamond)
+    valid = [e for e in diagram.edges
+             if e.source in layout.nodes and e.target in layout.nodes]
+    for spec, e in zip(valid, layout.edges):
+        src, tgt = layout.nodes[e.source], layout.nodes[e.target]
+        s_meta, t_meta = node_meta.get(e.source), node_meta.get(e.target)
+        pts = list(e.points)
+        inset_s = 0.94 if (s_meta and s_meta.shape in round_shapes) else 1.0
+        inset_t = 0.94 if (t_meta and t_meta.shape in round_shapes) else 1.0
+        pts[0] = _border_point(src, pts[1], inset_s)
+        pts[-1] = _border_point(tgt, pts[-2], inset_t)
+        sampled = [dr.T(*p) for p in _catmull(pts)]
+        color = hex_rgba(spec.color) if spec.color else dr.ink
+
+        if spec.style == EdgeStyle.dashed:
+            for piece in _dash(sampled, 13 * unit, 9 * unit):
+                if len(piece) > 1:
+                    dr.stroke_path(piece, color, passes=1, seed=_hash(e.source + e.target) & 255)
+        elif spec.style == EdgeStyle.dotted:
+            for piece in _dash(sampled, 2.5 * unit, 8 * unit):
+                if len(piece) > 1:
+                    dr.stroke_path(piece, color, passes=1, seed=_hash(e.source + e.target) & 255)
+        else:
+            dr.stroke_path(sampled, color, passes=1, seed=_hash(e.source + e.target) & 255)
+
+        # arrow heads
+        def arrow(tip: Point, frm: Point):
+            dx, dy = tip[0] - frm[0], tip[1] - frm[1]
+            L = math.hypot(dx, dy) or 1.0
+            ux, uy = dx / L, dy / L
+            px, py = -uy, ux
+            size = 12 * unit
+            base = (tip[0] - ux * size, tip[1] - uy * size)
+            half = size * 0.6
+            tri = [tip, (base[0] + px * half, base[1] + py * half),
+                   (base[0] - px * half, base[1] - py * half)]
+            dr.d.polygon(tri, fill=color)
+        if spec.arrow:
+            arrow(sampled[-1], sampled[-2])
+        if spec.bidirectional:
+            arrow(sampled[0], sampled[1])
+
+        # edge label (drawn later, on top of everything)
+        if spec.label:
+            mid = sampled[len(sampled) // 2]
+            lb = layout_block(spec.label, size=diagram.font_size * 0.78, weight=600,
+                              max_width=diagram.font_size * 12)
+            lb.size = diagram.font_size * 0.78
+            deferred_labels.append((lb, mid))
+
+    # --- nodes ---
+    for nid, pn in layout.nodes.items():
+        meta = node_meta.get(nid)
+        shape = meta.shape if meta else Shape.rounded
+        if meta and meta.color:
+            fill = meta.color
+        elif meta and meta.group and group_color.get(meta.group):
+            fill = group_color[meta.group]
+        else:
+            fill = PALETTE[_hash(nid) % len(PALETTE)]
+        cx, cy = dr.T(pn.x, pn.y)
+        w, h = pn.w * unit, pn.h * unit
+        seed = _hash(nid) & 255
+        fill_rgba = hex_rgba(fill, 235)
+
+        if shape == Shape.cylinder:
+            _draw_cylinder(dr, cx, cy, w, h, fill_rgba, seed)
+        else:
+            dr.shape(_shape_points(shape, cx, cy, w, h), fill_rgba, seed=seed)
+            if shape == Shape.note:
+                _draw_note_fold(dr, cx, cy, w, h)
+
+        blk = blocks[nid]
+        dr.text_block(blk, cx, cy, 600, diagram.accent)
+
+    # --- edge labels on top ---
+    for lb, mid in deferred_labels:
+        bw, bh = lb.w * unit, lb.h * unit
+        pad = 5 * unit
+        dr.d.rounded_rectangle(
+            [mid[0] - bw / 2 - pad, mid[1] - bh / 2 - pad / 2,
+             mid[0] + bw / 2 + pad, mid[1] + bh / 2 + pad / 2],
+            radius=8 * unit, fill=(255, 255, 255, 225))
+        dr.text_block(lb, mid[0], mid[1], 600, diagram.accent)
+
+
+def _draw_cylinder(dr: _Drawer, cx, cy, w, h, fill, seed):
+    ry = h * 0.12
+    x0, x1 = cx - w / 2, cx + w / 2
+    y0, y1 = cy - h / 2, cy + h / 2
+    body = [(x0, y0 + ry)] + _ellipse_pts(cx, y1 - ry, w, 2 * ry)[0:25] + [(x1, y0 + ry)]
+    dr.d.rectangle([x0, y0 + ry, x1, y1 - ry], fill=fill)
+    dr.d.ellipse([x0, y1 - 2 * ry, x1, y1], fill=fill)
+    dr.d.ellipse([x0, y0, x1, y0 + 2 * ry], fill=fill)
+    # outline
+    dr.stroke_path([(x0, y0 + ry), (x0, y1 - ry)], dr.ink, passes=2, seed=seed)
+    dr.stroke_path([(x1, y0 + ry), (x1, y1 - ry)], dr.ink, passes=2, seed=seed + 1)
+    dr.stroke_path(_ellipse_pts(cx, y0 + ry, w, 2 * ry), dr.ink, closed=True, passes=2, seed=seed + 2)
+    front = _ellipse_pts(cx, y1 - ry, w, 2 * ry)
+    front = [p for p in front if p[1] >= y1 - ry - 0.5]
+    dr.stroke_path(front, dr.ink, passes=2, seed=seed + 3)
+
+
+def _draw_note_fold(dr: _Drawer, cx, cy, w, h):
+    k = min(w, h) * 0.22
+    x1, y0 = cx + w / 2, cy - h / 2
+    dr.stroke_path([(x1 - k, y0), (x1 - k, y0 + k), (x1, y0 + k)], dr.ink, passes=1)
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+def render_png_bytes(diagram: Diagram, width: int = 1920, height: int = 1080,
+                     scale: float = 2.0, transparent: bool = True,
+                     pad_frac: float = 0.05, supersample: int = 2) -> bytes:
+    import io
+
+    fs = diagram.font_size
+    blocks = {n.id: _node_block(n, fs) for n in diagram.nodes}
+
+    def measure(node, font_size):
+        b = blocks[node.id]
+        return _inflate(b.w, b.h, node.shape, font_size)
+
+    layout = layout_diagram(diagram, measure=measure)
+
+    # scene = optional title band + diagram (in layout units)
+    W, H = layout.width, layout.height
+    title_block = None
+    top = 0.0
+    if diagram.title:
+        title_block = layout_block(diagram.title, size=fs * 1.9, weight=700)
+        title_block.size = fs * 1.9
+        top = title_block.h + fs * 1.1
+    scene_w = max(W, title_block.w if title_block else 0)
+    scene_h = H + top
+    diagram_ox = (scene_w - W) / 2
+
+    # fit into the frame
+    fw, fh = int(width * scale), int(height * scale)
+    pad = pad_frac * min(fw, fh)
+    fit = min((fw - 2 * pad) / scene_w, (fh - 2 * pad) / scene_h)
+
+    ss = max(1, supersample)
+    unit = fit * ss
+    scene_px_w = int(math.ceil(scene_w * unit)) + 2
+    scene_px_h = int(math.ceil(scene_h * unit)) + 2
+
+    scene = Image.new("RGBA", (scene_px_w, scene_px_h), (0, 0, 0, 0))
+    _draw_scene(diagram, layout, blocks, unit,
+                ox=diagram_ox * unit, oy=top * unit, img=scene)
+
+    # title
+    if title_block is not None:
+        tdr = _Drawer(scene, unit, 0, 0, diagram.accent)
+        tdr.text_block(title_block, scene_w * unit / 2,
+                       (title_block.h / 2 + fs * 0.2) * unit, 700, diagram.accent)
+        # little underline flourish
+        uw = title_block.w * unit * 0.6
+        ucx = scene_w * unit / 2
+        uy = (title_block.h + fs * 0.25) * unit
+        tdr.stroke_path([(ucx - uw / 2, uy), (ucx + uw / 2, uy)],
+                        hex_rgba(diagram.accent, 140), width=max(1, 2 * unit), passes=1)
+
+    # downsample supersample
+    if ss > 1:
+        scene = scene.resize((max(1, scene_px_w // ss), max(1, scene_px_h // ss)),
+                             Image.LANCZOS)
+
+    # compose onto the frame
+    bg = (0, 0, 0, 0) if transparent else hex_rgba(diagram.paper)
+    frame = Image.new("RGBA", (fw, fh), bg)
+    px = (fw - scene.width) // 2
+    py = (fh - scene.height) // 2
+    frame.alpha_composite(scene, (px, py))
+
+    buf = io.BytesIO()
+    frame.save(buf, format="PNG")
+    return buf.getvalue()

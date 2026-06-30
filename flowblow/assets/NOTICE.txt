@@ -1,0 +1,4 @@
+Caveat-600.ttf / Caveat-700.ttf are subsets of the "Caveat" typeface by
+The Caveat Project Authors (https://github.com/googlefonts/caveat),
+licensed under the SIL Open Font License, Version 1.1.
+Bundled here so FlowBlow's handwritten output works without network access.

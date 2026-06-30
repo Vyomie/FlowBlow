@@ -1,0 +1,31 @@
+{
+  "title": "Microservice Architecture",
+  "direction": "TB",
+  "groups": [
+    {"id": "edge", "label": "Edge", "color": "#a0c4ff"},
+    {"id": "svc", "label": "Services", "color": "#caffbf"},
+    {"id": "data", "label": "Data Layer", "color": "#ffd6a5"}
+  ],
+  "nodes": [
+    {"id": "client", "label": "Browser / App", "shape": "circle", "icon": "🌐"},
+    {"id": "gw", "label": "API Gateway", "shape": "hexagon", "group": "edge"},
+    {"id": "auth", "label": "Auth Service", "group": "svc"},
+    {"id": "orders", "label": "Orders Service", "group": "svc"},
+    {"id": "pay", "label": "Payments Service", "group": "svc"},
+    {"id": "queue", "label": "Event Bus", "shape": "parallelogram", "group": "svc"},
+    {"id": "pg", "label": "Postgres", "shape": "cylinder", "group": "data"},
+    {"id": "redis", "label": "Redis Cache", "shape": "cylinder", "group": "data"},
+    {"id": "ext", "label": "Stripe API", "shape": "cloud"}
+  ],
+  "edges": [
+    {"from": "client", "to": "gw", "label": "HTTPS"},
+    {"from": "gw", "to": "auth", "label": "verify"},
+    {"from": "gw", "to": "orders"},
+    {"from": "orders", "to": "pay", "label": "charge"},
+    {"from": "auth", "to": "redis", "style": "dashed", "label": "session"},
+    {"from": "orders", "to": "pg"},
+    {"from": "pay", "to": "ext", "label": "API call"},
+    {"from": "pay", "to": "queue", "label": "emit event"},
+    {"from": "queue", "to": "orders", "style": "dotted", "label": "paid"}
+  ]
+}
