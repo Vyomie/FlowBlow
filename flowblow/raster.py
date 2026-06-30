@@ -481,18 +481,18 @@ def _draw_scene(diagram: Diagram, layout, blocks, ux: float, uy: float,
             perp = (-dy / L, dx / L)
             if perp[1] > 0:                # prefer the "upper" side
                 perp = (-perp[0], -perp[1])
-            # yes/no decision labels -> a big green "Y" / red "N"
+            # yes/no decision labels -> a green "Y" / red "N", kept tight to line
             low = spec.label.strip().lower()
             if low in ("yes", "y"):
-                text, lcolor, lsize, weight = "Y", "#2e9e3f", diagram.font_size * 1.9, 700
+                text, lcolor, lsize, weight, tight = "Y", "#2e9e3f", diagram.font_size * 1.25, 700, True
             elif low in ("no", "n"):
-                text, lcolor, lsize, weight = "N", "#d83a3a", diagram.font_size * 1.9, 700
+                text, lcolor, lsize, weight, tight = "N", "#d83a3a", diagram.font_size * 1.25, 700, True
             else:
-                text, lcolor, lsize, weight = spec.label, diagram.accent, diagram.font_size, 600
+                text, lcolor, lsize, weight, tight = spec.label, diagram.accent, diagram.font_size, 600, False
             lb = layout_block(text, size=lsize, weight=weight,
                               max_width=diagram.font_size * 14)
             lb.size = lsize
-            deferred_labels.append((lb, mid, perp, lcolor, weight))
+            deferred_labels.append((lb, mid, perp, lcolor, weight, tight))
 
     # --- nodes ---
     for nid, pn in layout.nodes.items():
@@ -536,8 +536,19 @@ def _draw_scene(diagram: Diagram, layout, blocks, ux: float, uy: float,
             best = min(best, dist)
         return best
 
-    for lb, mid, perp, lcolor, lweight in deferred_labels:
+    for lb, mid, perp, lcolor, lweight, tight in deferred_labels:
         hw, hh = lb.w * unit / 2, lb.h * unit / 2
+        if tight:
+            # decision letters stay right next to the line; just pick the side
+            # with a bit more room and don't wander off.
+            off = hh + 7 * unit
+            best = max(((mid[0] + perp[0] * s * off, mid[1] + perp[1] * s * off)
+                        for s in (1, -1)),
+                       key=lambda c: _clearance(c[0], c[1], hw, hh))
+            W, H = dr.img.size
+            dr.label_with_halo(lb, min(max(best[0], hw + 4), W - hw - 4),
+                               min(max(best[1], hh + 4), H - hh - 4), lweight, lcolor)
+            continue
         # Keep the label at the MIDDLE of the line, beside it. On each side,
         # step out from the line just far enough to clear any node; then prefer
         # the side that clears with the least travel (i.e. the open side).

@@ -582,6 +582,45 @@ def layout_diagram(diagram: Diagram, measure=None) -> Layout:
 # group internals are dropped back in. This makes every cluster a fully
 # disjoint region.
 # ---------------------------------------------------------------------------
+def _seg_hits_box(a, b, box, samples: int = 40) -> bool:
+    """True if segment a-b passes through the (already-inflated) box interior."""
+    x0, y0, x1, y1 = box
+    for i in range(1, samples):
+        t = i / samples
+        x = a[0] + (b[0] - a[0]) * t
+        y = a[1] + (b[1] - a[1]) * t
+        if x0 < x < x1 and y0 < y < y1:
+            return True
+    return False
+
+
+def _route_around(a, b, boxes):
+    """Route a-b as a poly-line that detours around obstacle boxes (so edges
+    never pass behind nodes). Each box is (x0,y0,x1,y1), already inflated."""
+    path = [a, b]
+    for _ in range(10):
+        hit = None
+        for i in range(len(path) - 1):
+            for box in boxes:
+                if _seg_hits_box(path[i], path[i + 1], box):
+                    hit = (i, box)
+                    break
+            if hit:
+                break
+        if not hit:
+            break
+        i, (x0, y0, x1, y1) = hit
+        p, q = path[i], path[i + 1]
+        # detour through whichever box corner adds the least length
+        corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        best = min(corners, key=lambda c: math.hypot(c[0] - p[0], c[1] - p[1])
+                   + math.hypot(q[0] - c[0], q[1] - c[1]))
+        if best in path:           # avoid an infinite loop
+            break
+        path.insert(i + 1, best)
+    return path
+
+
 def _sublayout(diagram: Diagram, member_ids, sizes, node_by_id) -> Layout:
     mset = set(member_ids)
     nodes = [node_by_id[i] for i in member_ids]
@@ -650,13 +689,20 @@ def layout_clustered(diagram: Diagram, measure=None) -> Layout:
         if n.id in ql.nodes:
             placed[n.id] = ql.nodes[n.id]
 
-    # 4. straight edges between real node centres
+    # 4. edges between real node centres, routed AROUND other nodes so a line
+    #    never passes behind a node.
+    inflate = SIBLING_GAP * 0.45
+    boxes = {nid: (p.x - p.w / 2 - inflate, p.y - p.h / 2 - inflate,
+                   p.x + p.w / 2 + inflate, p.y + p.h / 2 + inflate)
+             for nid, p in placed.items()}
     pedges: List[PlacedEdge] = []
     for e in diagram.edges:
         if e.source in placed and e.target in placed:
             ps, pt = placed[e.source], placed[e.target]
+            obstacles = [b for nid, b in boxes.items() if nid not in (e.source, e.target)]
+            pts = _route_around((ps.x, ps.y), (pt.x, pt.y), obstacles)
             pedges.append(PlacedEdge(source=e.source, target=e.target,
-                                     points=[(ps.x, ps.y), (pt.x, pt.y)], reversed=False))
+                                     points=pts, reversed=False))
 
     # 5. group boxes from their (now contiguous) members
     gplaced: List[PlacedGroup] = []
