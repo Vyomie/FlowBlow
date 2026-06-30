@@ -451,6 +451,25 @@ class _Engine:
             else:
                 align(down, list(range(len(self.layers) - 1, -1, -1)))
 
+        # Compaction: nodes with no neighbours above or below tend to drift far
+        # from their siblings, leaving big gaps (and oversized cluster boxes).
+        # Pull each such "free" node next to its layer siblings.
+        for _ in range(4):
+            for layer in self.layers:
+                for i, nid in enumerate(layer):
+                    if up[nid] or down[nid]:
+                        continue
+                    n = self.nodes[nid]
+                    left = self.nodes[layer[i - 1]] if i > 0 else None
+                    right = self.nodes[layer[i + 1]] if i < len(layer) - 1 else None
+                    if left and right:
+                        n.cross = (left.cross + right.cross) / 2
+                    elif left:
+                        n.cross = left.cross + cross_size(left) / 2 + cross_size(n) / 2 + SIBLING_GAP
+                    elif right:
+                        n.cross = right.cross - cross_size(right) / 2 - cross_size(n) / 2 - SIBLING_GAP
+                resolve(layer)
+
     # -- 6. project to pixels ----------------------------------------------
     def finalize(self) -> Layout:
         # Main-axis position per rank from per-rank max main-size.
