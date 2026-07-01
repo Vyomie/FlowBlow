@@ -1,0 +1,15 @@
+.git
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+examples/png/
+examples/out/
+*.png
+!flowblow/assets/*
+docs/
+tests/
+.DS_Store

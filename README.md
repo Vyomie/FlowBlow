@@ -44,7 +44,6 @@ pip install -r requirements.txt      # Pillow, matplotlib, pydantic (+ fastapi f
 from flowblow import render_png
 
 render_png({
-    "title": "Gradient Descent",
     "direction": "TB",
     "nodes": [
         {"id": "s", "label": "Start", "shape": "stadium", "color": "#caffbf"},
@@ -80,18 +79,32 @@ uvicorn flowblow.api:app --reload
 # GET  /examples/{name}.png   -> a bundled example
 ```
 
+Full API reference: **[docs/api.md](docs/api.md)**.
+
+### Deploy to Google Cloud Run
+
+A ready-to-use [`Dockerfile`](Dockerfile) is included (bundles the fonts,
+matplotlib, and warms caches). One command:
+
+```bash
+gcloud run deploy flowblow --source . --region us-central1 \
+  --allow-unauthenticated --memory 2Gi --cpu 2 --concurrency 8
+```
+
+Full guide (recommended settings, auth, CI): **[docs/deploy.md](docs/deploy.md)**.
+
 ## Diagram spec
 
 | field        | meaning |
 |--------------|---------|
-| `title`      | optional heading drawn above the diagram |
 | `direction`  | `TB` / `BT` / `LR` / `RL` (auto-rotated to best fill the frame) |
 | `nodes[]`    | `id`, `label`, `shape`, `color`, `group`, `icon` |
 | `edges[]`    | `from`/`to` (or `source`/`target`), `label`, `style`, `color`, `bidirectional` |
-| `groups[]`   | `id`, `label`, `color` — drawn as a labelled cluster behind its members |
-| `font_size`  | base size (default 34); plus `accent`/`paper` colours |
+| `groups[]`   | `id`, `label`, `color` — laid out as disjoint labelled clusters |
+| `font_size`  | base size (default 40); plus `accent`/`paper` colours |
 
-Labels may contain inline LaTeX in `$...$` or `$$...$$`.
+Labels may contain inline LaTeX in `$...$` or `$$...$$`. Edges labelled `yes`/`no`
+render as a big green **Y** / red **N**. Full reference: **[docs/spec.md](docs/spec.md)**.
 
 ## Rendering options (`render_png`)
 
@@ -107,6 +120,22 @@ default 2 → 2160×3840), `transparent` (default `True`), `pad_frac`,
   is present the icon is simply omitted.
 - A standalone HTML renderer (`render_html`) is also available — it uses MathJax
   via CDN and is handy for live/scalable embedding.
+
+## Documentation
+
+- **[docs/spec.md](docs/spec.md)** — full diagram spec (nodes, edges, groups, shapes, LaTeX)
+- **[docs/api.md](docs/api.md)** — HTTP API reference
+- **[docs/deploy.md](docs/deploy.md)** — deploying to Google Cloud Run
+
+## How it works
+
+1. **Measure** every node with real font metrics (text + LaTeX + emoji).
+2. **Layout** with a layered (Sugiyama) engine; clusters are laid out as
+   self-contained units and arranged as disjoint regions.
+3. **Route** edges around node boxes (visibility graph) and away from each
+   other (crossing-penalised), so lines don't pass behind nodes or cut across.
+4. **Draw** with Pillow: hand-drawn (jittered, double-stroked) shapes, the
+   Caveat font, composited LaTeX, scaled to fill the frame.
 
 ## Tests
 

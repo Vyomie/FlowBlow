@@ -1,0 +1,14 @@
+# Files not uploaded to Cloud Build when deploying with `gcloud run deploy`.
+.git
+.gitignore
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+examples/png/
+examples/out/
+*.png
+!flowblow/assets/
+docs/
+tests/
