@@ -31,7 +31,6 @@ __all__ = [
     "layout_diagram",
     "render",
     "render_html",
-    "render_png",
     "build_diagram",
 ]
 
@@ -51,13 +50,3 @@ def render_html(spec: Union[dict, Diagram]) -> str:
     layout = layout_diagram(diagram)
     return render(diagram, layout)
 
-
-def render_png(spec: Union[dict, Diagram], **kwargs):
-    """Rasterise ``spec`` to a transparent 16:9 PNG (needs Playwright/Chromium).
-
-    Thin re-export of :func:`flowblow.image.render_png` so the heavy Playwright
-    import only happens when PNG export is actually used.
-    """
-    from .image import render_png as _render_png
-
-    return _render_png(spec, **kwargs)

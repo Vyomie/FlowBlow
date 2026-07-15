@@ -1,6 +1,4 @@
-# Core rendering
-Pillow>=10.0
-matplotlib>=3.7
+# Core HTML/SVG rendering
 pydantic>=2.5
 # HTTP API (optional -- only needed for flowblow.api)
 fastapi>=0.110

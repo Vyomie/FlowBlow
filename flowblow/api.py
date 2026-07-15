@@ -1,4 +1,4 @@
-"""FastAPI application exposing FlowBlow as an HTTP API (PNG output).
+"""FastAPI application exposing FlowBlow as an HTTP API (HTML output).
 
 Run with::
 
@@ -7,13 +7,8 @@ Run with::
 Endpoints
 ---------
 GET  /                    -> tiny interactive playground (paste JSON, see PNG)
-POST /render              -> hand-drawn diagram as image/png  (the main one)
 POST /render.html         -> standalone HTML version (LaTeX via MathJax/CDN)
-GET  /examples/{name}.png -> render a bundled example to PNG
 GET  /healthz             -> liveness probe
-
-The PNG endpoints take optional query params: ``width``, ``height``,
-``scale``, ``transparent``.
 """
 from __future__ import annotations
 
@@ -21,16 +16,15 @@ import json
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse
 
 from . import __version__, render_html
-from .image import render_png
 from .models import Diagram
 
 app = FastAPI(
     title="FlowBlow",
     version=__version__,
-    description="Hand-drawn flow & architecture diagrams as PNG, with LaTeX.",
+description="Hand-drawn flow & architecture diagrams as HTML/SVG, with LaTeX.",
 )
 
 EXAMPLES_DIR = Path(__file__).resolve().parent.parent / "examples"
@@ -41,39 +35,23 @@ def healthz() -> dict:
     return {"status": "ok", "version": __version__}
 
 
-@app.post("/render")
-def render_endpoint(
-    diagram: Diagram,
-    width: int = 1080,
-    height: int = 1920,
-    scale: float = 2.0,
-    transparent: bool = True,
-) -> Response:
-    """Render a diagram spec to a transparent hand-drawn PNG."""
-    try:
-        png = render_png(diagram, width=width, height=height, scale=scale,
-                         transparent=transparent)
-    except Exception as exc:  # pragma: no cover - defensive
-        raise HTTPException(status_code=400, detail=f"render failed: {exc}") from exc
-    return Response(content=png, media_type="image/png")
-
-
 @app.post("/render.html", response_class=HTMLResponse)
 def render_html_endpoint(diagram: Diagram) -> HTMLResponse:
     """Standalone HTML version (handy for live/scalable embedding)."""
-    return HTMLResponse(content=render_html(diagram))
+    try:
+        return HTMLResponse(content=render_html(diagram))
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=400, detail=f"render failed: {exc}") from exc
 
 
-@app.get("/examples/{name}.png")
-def render_example(name: str, width: int = 1080, height: int = 1920,
-                   scale: float = 2.0, transparent: bool = True) -> Response:
+@app.get("/examples/{name}.html", response_class=HTMLResponse)
+def render_example(name: str) -> HTMLResponse:
     path = EXAMPLES_DIR / f"{name}.json"
     if not path.exists():
         available = sorted(p.stem for p in EXAMPLES_DIR.glob("*.json"))
         raise HTTPException(status_code=404, detail=f"unknown example. try: {available}")
     spec = json.loads(path.read_text())
-    png = render_png(spec, width=width, height=height, scale=scale, transparent=transparent)
-    return Response(content=png, media_type="image/png")
+    return HTMLResponse(content=render_html(spec))
 
 
 PLAYGROUND = """<!DOCTYPE html><html><head><meta charset="utf-8">
@@ -124,10 +102,9 @@ async function go(){
   let spec;
   try{ spec = JSON.parse(document.getElementById('spec').value); }
   catch(e){ alert('Invalid JSON: '+e); return; }
-  const r = await fetch('/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(spec)});
+  const r = await fetch('/render.html',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(spec)});
   if(!r.ok){ alert('Render failed: '+await r.text()); return; }
-  const blob = await r.blob();
-  document.getElementById('out').src = URL.createObjectURL(blob);
+  document.getElementById('right').innerHTML = await r.text();
 }
 go();
 </script></body></html>"""

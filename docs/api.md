@@ -1,71 +1,57 @@
-# HTTP API reference
+# HTTP API Reference
 
 Run locally:
 
 ```bash
-uvicorn flowblow.api:app --reload      # http://127.0.0.1:8000
+uvicorn flowblow.api:app --reload
 ```
 
-Interactive docs are auto-generated at `/docs` (Swagger) and `/redoc`.
+Interactive docs are available at `/docs` and `/redoc`.
 
 ## Endpoints
 
 ### `GET /`
-The interactive playground — paste a diagram spec, hit **Render**, see the PNG.
 
-### `POST /render` → `image/png`
-Render a diagram spec (see [spec.md](spec.md)) to a transparent hand-drawn PNG.
+Interactive playground. Paste a diagram spec, render it, and inspect the HTML
+diagram in the browser.
 
-Query parameters (all optional):
+### `POST /render.html` → `text/html`
 
-| param | default | meaning |
-|-------|---------|---------|
-| `width` | `1080` | frame width in logical px |
-| `height` | `1920` | frame height in logical px (default is 9:16 portrait) |
-| `scale` | `2.0` | output pixel multiplier (2 → 2160×3840) |
-| `transparent` | `true` | transparent background (else the `paper` colour) |
+Render a diagram spec to a standalone HTML document.
 
 ```bash
-curl -X POST "http://localhost:8000/render?width=1600&height=900" \
+curl -X POST "http://localhost:8000/render.html" \
   -H 'Content-Type: application/json' \
   -d '{
     "nodes": [{"id":"a","label":"Start","shape":"stadium"},
               {"id":"b","label":"$E=mc^2$"}],
     "edges": [{"from":"a","to":"b","label":"go"}]
-  }' -o diagram.png
+  }' > diagram.html
 ```
 
-### `POST /render.html` → `text/html`
-Same diagram as a standalone HTML document (LaTeX via MathJax, Caveat font
-embedded). Handy for scalable/embeddable output.
+### `GET /examples/{name}.html` → `text/html`
 
-### `GET /examples/{name}.png` → `image/png`
-Render one of the bundled examples (`simple`, `algorithm`, `architecture`).
-Accepts the same query params as `/render`.
+Render one bundled example: `simple`, `algorithm`, or `architecture`.
 
 ### `GET /healthz` → `application/json`
-Liveness probe: `{"status": "ok", "version": "..."}`.
+
+Liveness probe: `{"status":"ok","version":"..."}`.
 
 ## Errors
 
-Invalid specs return `400` with a JSON `detail` message. A spec that fails
-Pydantic validation (e.g. missing `id`) returns `422` with field-level errors.
+Invalid specs return `400` with a JSON `detail` message. Pydantic validation
+errors return `422` with field-level errors.
 
-## Using it from Python instead
-
-You don't need the HTTP server — the library is directly importable:
+## Python
 
 ```python
-from flowblow import render_png, render_html
+from flowblow import render_html
 
-render_png(spec, output="out.png")     # bytes, transparent 9:16 by default
-html = render_html(spec)               # standalone HTML string
+html = render_html(spec)
 ```
 
-Or the CLI:
+## CLI
 
 ```bash
-python -m flowblow spec.json -o out.png
-python -m flowblow spec.json --html -o out.html
-python -m flowblow spec.json --width 1600 --height 900 --opaque
+python -m flowblow spec.json -o out.html
 ```
